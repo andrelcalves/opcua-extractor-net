@@ -130,15 +130,15 @@ namespace Cognite.OpcUa.Pushers.Writers
             var tasks = new List<Task>();
             if (rawConfig.AssetsTable != null)
             {
-                tasks.Add(MarkRawRowsAsDeleted(rawConfig.Database, rawConfig.AssetsTable, deletes.Objects, token));
+                tasks.Add(MarkRawRowsAsDeleted(rawConfig.Database, rawConfig.AssetsTable, deletes.Objects.Select(d => d.Id), token));
             }
             if (rawConfig.TimeseriesTable != null)
             {
-                tasks.Add(MarkRawRowsAsDeleted(rawConfig.Database, rawConfig.TimeseriesTable, deletes.Variables, token));
+                tasks.Add(MarkRawRowsAsDeleted(rawConfig.Database, rawConfig.TimeseriesTable, deletes.Variables.Select(d => d.Id), token));
             }
             if (rawConfig.RelationshipsTable != null)
             {
-                tasks.Add(MarkRawRowsAsDeleted(rawConfig.Database, rawConfig.RelationshipsTable, deletes.References, token));
+                tasks.Add(MarkRawRowsAsDeleted(rawConfig.Database, rawConfig.RelationshipsTable, deletes.References.Select(d => d.Id), token));
             }
             await Task.WhenAll(tasks);
         }
@@ -366,7 +366,7 @@ namespace Cognite.OpcUa.Pushers.Writers
         {
             if (!keys.Any()) return;
             var keySet = new HashSet<string>(keys);
-            var rows = await WriterUtils.GetRawRows(dbName, tableName, destination, keys, log, token);
+            var rows = await WriterUtils.GetRawRows(dbName, tableName, destination, null, log, token);
             var trueElem = JsonDocument.Parse("true").RootElement;
             var toMark = rows.Where(r => keySet.Contains(r.Key)).ToList();
             foreach (var row in toMark)

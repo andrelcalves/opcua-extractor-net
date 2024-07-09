@@ -76,10 +76,6 @@ namespace Cognite.OpcUa.Pushers.Writers
                 {
                     await UpdateAssets(extractor, nodes, assets, update, result, token);
                 }
-                else
-                {
-                    log.LogDebug("Not updating cause fuck you");
-                }
 
                 report.AssetsUpdated += result.Updated;
                 report.AssetsCreated += result.Created;
@@ -131,9 +127,11 @@ namespace Cognite.OpcUa.Pushers.Writers
         {
             var assets = new List<Asset>();
             var maxSize = config.Cognite?.CdfChunking.Assets ?? 1000;
+            bool isFirstChunk = true;
             foreach (var chunk in Chunking.ChunkByHierarchy(assetMap.Values, maxSize, node => node.Id, node => node.ParentId))
             {
-                var assetChunk = await destination.GetOrCreateAssetsAsync(chunk.Select(node => extractor.GetUniqueId(node.Id)!), ids =>
+                var extIds = new HashSet<string>(chunk.Select(node => extractor.GetUniqueId(node.Id)!));
+                var assetChunk = await destination.GetOrCreateAssetsAsync(extIds, ids =>
                 {
                     var assets = ids.Select(id => assetMap[id]);
                     var creates = assets
@@ -142,10 +140,25 @@ namespace Cognite.OpcUa.Pushers.Writers
                             extractor,
                             config.Cognite?.DataSet?.Id,
                             config.Cognite?.MetadataMapping?.Assets))
-                        .Where(asset => asset != null);
+                        .Where(asset => asset != null)
+                        .ToList();
+                    if (isFirstChunk)
+                    {
+                        foreach (var asset in creates)
+                        {
+                            if (asset.ParentExternalId != null && !assetMap.ContainsKey(asset.ParentExternalId) && !extIds.Contains(asset.ParentExternalId))
+                            {
+                                log.LogWarning("Parent asset {Id} not found for asset {CId}", asset.ParentExternalId, asset.ExternalId);
+                                asset.ParentExternalId = null;
+                            }
+                        }
+                    }
+
                     result.Created += creates.Count();
                     return creates;
-                }, RetryMode.None, SanitationMode.Clean, token);
+                }, RetryMode.OnError, SanitationMode.Clean, token);
+
+                isFirstChunk = false;
 
                 log.LogResult(assetChunk, RequestType.CreateAssets, true);
 
@@ -185,6 +198,11 @@ namespace Cognite.OpcUa.Pushers.Writers
 
                     if (assetUpdate == null)
                         continue;
+                    if (assetUpdate.ParentExternalId != null && !assetMap.ContainsKey(assetUpdate.ParentExternalId.Set))
+                    {
+                        log.LogWarning("Parent asset {Id} not found for asset {CId}", assetUpdate.ParentExternalId.Set, asset.ExternalId);
+                        assetUpdate.ParentExternalId = null;
+                    }
                     if (
                         assetUpdate.ParentExternalId != null
                         || assetUpdate.Description != null
@@ -192,11 +210,13 @@ namespace Cognite.OpcUa.Pushers.Writers
                         || assetUpdate.Metadata != null
                     )
                     {
+
+
                         updates.Add(new AssetUpdateItem(asset.ExternalId) { Update = assetUpdate });
                     }
                 }
             }
-            if (updates.Any())
+            if (updates.Count != 0)
             {
                 var res = await destination.UpdateAssetsAsync(updates, RetryMode.OnError, SanitationMode.Clean, token);
 
@@ -225,7 +245,7 @@ namespace Cognite.OpcUa.Pushers.Writers
             }
             catch (ResponseException ex)
             {
-                if (ex.Duplicated.Any())
+                if (ex.Duplicated != null && ex.Duplicated.Any())
                 {
                     var existing = new HashSet<string>();
                     foreach (var dict in ex.Duplicated)
@@ -238,7 +258,7 @@ namespace Cognite.OpcUa.Pushers.Writers
                             }
                         }
                     }
-                    if (!existing.Any())
+                    if (existing.Count == 0)
                         throw;
 
                     relationships = relationships
@@ -257,8 +277,8 @@ namespace Cognite.OpcUa.Pushers.Writers
         public async Task MarkDeleted(DeletedNodes deletes, CancellationToken token)
         {
             await Task.WhenAll(
-                SetAssetsDeleted(deletes.Objects, token),
-                DeleteRelationships(deletes.References, token)
+                SetAssetsDeleted(deletes.Objects.Select(d => d.Id), token),
+                DeleteRelationships(deletes.References.Select(d => d.Id), token)
             );
         }
 

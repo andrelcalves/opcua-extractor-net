@@ -10,7 +10,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using MQTTnet;
 using MQTTnet.Client;
-using MQTTnet.Client.Options;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -42,6 +41,7 @@ namespace Test.Unit
             private readonly IMqttClient client;
             private readonly MqttApplicationMessageBuilder baseBuilder;
             private readonly IServiceProvider provider;
+            private readonly CancellationTokenSource source;
             public BridgeTester(CDFMockHandler.MockMode mode, ITestOutputHelper output)
             {
                 var services = new ServiceCollection();
@@ -54,25 +54,35 @@ namespace Test.Unit
                 provider = services.BuildServiceProvider();
 
                 Handler = provider.GetRequiredService<CDFMockHandler>();
+                source = new CancellationTokenSource();
 
                 bridge = new MQTTBridge(new Destination(Config.Cognite, provider), Config, provider.GetRequiredService<ILogger<MQTTBridge>>());
-                bridge.StartBridge(CancellationToken.None).Wait();
-                var options = new MqttClientOptionsBuilder()
+                try
+                {
+                    bridge.StartBridge(source.Token).Wait();
+                    var options = new MqttClientOptionsBuilder()
                     .WithClientId("test-mqtt-publisher")
                     .WithTcpServer(Config.Mqtt.Host, Config.Mqtt.Port)
                     .WithCleanSession()
                     .Build();
-                client = new MqttFactory().CreateMqttClient();
-                baseBuilder = new MqttApplicationMessageBuilder()
-                    .WithAtLeastOnceQoS();
-                client.ConnectAsync(options).Wait();
+                    client = new MqttFactory().CreateMqttClient();
+                    baseBuilder = new MqttApplicationMessageBuilder()
+                        .WithQualityOfServiceLevel(MQTTnet.Protocol.MqttQualityOfServiceLevel.AtLeastOnce);
+                    client.ConnectAsync(options).Wait();
+                }
+                catch
+                {
+                    source.Cancel();
+                    throw;
+                }
+
             }
 
             public async Task RecreateBridge()
             {
                 bridge.Dispose();
                 bridge = new MQTTBridge(new Destination(Config.Cognite, provider), Config, provider.GetRequiredService<ILogger<MQTTBridge>>());
-                bool success = await bridge.StartBridge(CancellationToken.None);
+                bool success = await bridge.StartBridge(source.Token);
                 if (!success) throw new ConfigurationException("Unable to start bridge");
             }
 
@@ -147,7 +157,7 @@ namespace Test.Unit
                     Table = "assets",
                     Rows = assets.Select(asset => new RawRowCreateDto<AssetCreate> { Key = asset.ExternalId, Columns = asset })
                 };
-                var data = JsonSerializer.SerializeToUtf8Bytes(wrapper, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+                var data = JsonSerializer.SerializeToUtf8Bytes(wrapper, Oryx.Cognite.Common.jsonOptions);
 
                 var msg = baseBuilder
                     .WithPayload(data)
@@ -179,6 +189,8 @@ namespace Test.Unit
             {
                 bridge?.Dispose();
                 client?.Dispose();
+                source.Cancel();
+                source.Dispose();
             }
         }
 
@@ -696,6 +708,7 @@ namespace Test.Unit
                     ExternalId = "test-event-9"
                 }
             };
+
             await tester.PublishAssets(assets);
             Assert.Equal(2, tester.Handler.Assets.Count);
             await tester.PublishEvents(roundOne);

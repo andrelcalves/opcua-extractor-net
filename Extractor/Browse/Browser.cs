@@ -39,7 +39,7 @@ namespace Cognite.OpcUa.Browse
 
         private readonly BlockingResourceCounter continuationPoints;
 
-        public IEnumerable<NodeFilter>? IgnoreFilters { get; set; }
+        public TransformationCollection? Transformations { get; set; }
 
         public Browser(ILogger<Browser> log, UAClient client, FullConfig config)
         {
@@ -49,6 +49,13 @@ namespace Cognite.OpcUa.Browse
             throttling = config.Source.BrowseThrottling;
             throttler = new TaskThrottler(throttling.MaxParallelism, false, throttling.MaxPerMinute, TimeSpan.FromMinutes(1));
             continuationPoints = new BlockingResourceCounter(throttling.MaxNodeParallelism <= 0 ? 100_000 : throttling.MaxNodeParallelism);
+        }
+
+        public void MaxNodeParallelismChanged()
+        {
+            continuationPoints.SetCapacity(
+                config.Source.BrowseThrottling.MaxNodeParallelism > 0 ? config.Source.BrowseThrottling.MaxNodeParallelism : 100_000
+            );
         }
 
         /// <summary>
@@ -153,7 +160,7 @@ namespace Cognite.OpcUa.Browse
                     .Select(r => uaClient.ToNodeId(r.NodeId))
                     .ToList();
 
-                if (toBrowseForTypeDef.Any())
+                if (toBrowseForTypeDef.Count != 0)
                 {
                     var nodes = toBrowseForTypeDef.Select(id => new BrowseNode(id)).ToDictionary(node => node.Id);
 
@@ -223,11 +230,11 @@ namespace Cognite.OpcUa.Browse
             string purpose = "")
         {
             var result = new Dictionary<NodeId, ReferenceDescriptionCollection>();
-            if (baseParams == null || baseParams.Nodes == null || !baseParams.Nodes.Any()) return result;
+            if (baseParams == null || baseParams.Nodes == null || baseParams.Nodes.Count == 0) return result;
             var options = new DirectoryBrowseParams
             {
                 Callback = GetDictWriteCallback(result),
-                Filters = doFilter ? IgnoreFilters : null,
+                Transformations = doFilter ? Transformations : null,
                 InitialParams = baseParams,
                 MaxNodeParallelism = throttling.MaxNodeParallelism,
                 NodesChunk = config.Source.BrowseNodesChunk,
@@ -280,7 +287,7 @@ namespace Cognite.OpcUa.Browse
                 Callback = callback,
                 NodesChunk = config.Source.BrowseNodesChunk,
                 MaxDepth = maxDepth,
-                Filters = doFilter ? IgnoreFilters : null,
+                Transformations = doFilter ? Transformations : null,
                 InitialParams = baseParams,
                 MaxNodeParallelism = throttling.MaxNodeParallelism
             };

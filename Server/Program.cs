@@ -18,6 +18,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA. 
 using Cognite.Extractor.Logging;
 using Cognite.Extractor.Utils.CommandLine;
 using Microsoft.Extensions.DependencyInjection;
+using Opc.Ua;
+using Serilog;
 using System;
 using System.Collections.Generic;
 using System.CommandLine;
@@ -101,12 +103,19 @@ namespace Server
         [CommandLineOption("Set server redundancy support. One of None, Cold, Warm, Hot, Transparent, HotAndMirrored")]
         public string RedundancySupport { get; set; }
 
-        [CommandLineOption("Server issue: This is the denominator for a probability that an arbitrary browse operation will fail " +
-            "I.e. 5 means that 1/5 browse ops will fail with BadNoCommunication")]
-        public int RandomBrowseFail { get; set; }
+        [CommandLineOption("Server issue: This is the denominator for a probability that an arbitrary operation will fail " +
+            "I.e. 5 means that 1/5 browse ops will fail with BadInternalError")]
+        public int RandomFail { get; set; }
+
         [CommandLineOption("List of NodeSet2 XML schemas to load the node hierarchy from, the base node hierarchy will not be loaded if this is specified. " +
             "May be specified more than once, the base OPC-UA nodeset should not be added.", true, "-s")]
         public IEnumerable<string> NodeSetFiles { get; set; }
+
+        [CommandLineOption("Enable setting random status codes on values. Each chunk of 10 values will get the same code")]
+        public bool RandomStatusCodes { get; set; }
+
+        [CommandLineOption("Enable reading instructions from the CLI while running, to execute tasks dynamically")]
+        public bool Interactive { get; set; }
     }
 
 
@@ -127,7 +136,8 @@ namespace Server
                 if (opt.CustomHistory || opt.CoreProfile) setups.Add(PredefinedSetup.Custom);
                 if (opt.EventHistory || opt.CoreProfile) setups.Add(PredefinedSetup.Events);
                 if (opt.GrowthPeriodic) setups.Add(PredefinedSetup.Auditing);
-            } else
+            }
+            else
             {
                 setups = new List<PredefinedSetup> { PredefinedSetup.Custom, PredefinedSetup.Base,
                     PredefinedSetup.Events, PredefinedSetup.Wrong, PredefinedSetup.Auditing };
@@ -151,18 +161,23 @@ namespace Server
             await server.Start();
 
             if (opt.Diagnostics) server.SetDiagnosticsEnabled(true);
-            if (opt.BaseHistory || opt.CoreProfile) server.PopulateBaseHistory();
-            if (opt.CustomHistory || opt.CoreProfile) server.PopulateCustomHistory();
+            if (opt.BaseHistory || opt.CoreProfile) server.PopulateBaseHistory(null, opt.RandomStatusCodes);
+            if (opt.CustomHistory || opt.CoreProfile) server.PopulateCustomHistory(null, opt.RandomStatusCodes);
             if (opt.EventHistory || opt.CoreProfile) server.PopulateEvents();
             server.SetEventConfig(opt.GrowthPeriodic, opt.EventsPeriodic || opt.CoreProfile || opt.EventsPeriodic || opt.GrowthPeriodic, opt.GrowthPeriodic);
 
             server.Server.Issues.MaxBrowseResults = opt.MaxBrowseResults;
             server.Server.Issues.MaxBrowseNodes = opt.MaxBrowseNodes;
             server.Server.Issues.MaxAttributes = opt.MaxAttributes;
-            server.Server.Issues.MaxSubscriptions = opt.MaxSubscriptions;
+            server.Server.Issues.MaxMonitoredItems = opt.MaxSubscriptions;
             server.Server.Issues.MaxHistoryNodes = opt.MaxHistoryNodes;
-            server.Server.Issues.RemainingBrowseCount = opt.RemainingBrowseCount;
-            server.Server.Issues.BrowseFailDenom = opt.RandomBrowseFail;
+            server.Server.Issues.RemainingBrowse = opt.RemainingBrowseCount;
+            server.Server.Issues.RandomBrowseFailDenom = opt.RandomFail;
+            server.Server.Issues.RandomBrowseNextFailDenom = opt.RandomFail;
+            server.Server.Issues.RandomHistoryReadFailDenom = opt.RandomFail;
+            server.Server.Issues.RandomReadFailDenom = opt.RandomFail;
+            server.Server.Issues.RandomCreateMonitoredItemsFailDenom = opt.RandomFail;
+            server.Server.Issues.RandomCreateSubscriptionsFailDenom = opt.RandomFail;
 
             if (opt.RedundancySupport != null)
             {
@@ -171,10 +186,23 @@ namespace Server
 
             int idx = 0;
 
+
+            var codeGen = ServerController.GetStatusGenerator();
+
             void ServerUpdate(object state)
             {
-                if (opt.BasePeriodic || opt.CoreProfile) server.UpdateBaseNodes(idx);
-                if (opt.CustomPeriodic || opt.CoreProfile) server.UpdateCustomNodes(idx);
+                StatusCode code;
+                if (opt.RandomStatusCodes)
+                {
+                    code = codeGen(idx);
+                }
+                else
+                {
+                    code = StatusCodes.Good;
+                }
+
+                if (opt.BasePeriodic || opt.CoreProfile) server.UpdateBaseNodes(idx, code);
+                if (opt.CustomPeriodic || opt.CoreProfile) server.UpdateCustomNodes(idx, code);
                 if (opt.EventsPeriodic || opt.CoreProfile) server.TriggerEvents(idx);
 
                 if (opt.GrowthPeriodic)
@@ -201,33 +229,45 @@ namespace Server
                 exitEvent.Set();
             };
 
-            var _ = Task.Run(() =>
+            if (opt.Interactive)
             {
-                int sl = opt.ServiceLevel;
-                while (true)
+                Console.WriteLine("Running in interactive mode. Instructions:");
+                Console.WriteLine("    L: Set service level to 190");
+                Console.WriteLine("    H: Set service level to 255");
+                Console.WriteLine("    G: Set service level to 180");
+                Console.WriteLine("    X: Kill all subscriptions on the server");
+                var _ = Task.Run(() =>
                 {
-                    var key = Console.ReadKey(true);
-                    if (key.Key == ConsoleKey.L && sl != 190)
+                    int sl = opt.ServiceLevel;
+                    while (true)
                     {
-                        server.SetServerRedundancyStatus(190, Opc.Ua.RedundancySupport.Hot);
-                        sl = 190;
-                        Console.WriteLine("Set service level to 190");
+                        var key = Console.ReadKey(true);
+                        if (key.Key == ConsoleKey.L && sl != 190)
+                        {
+                            server.SetServerRedundancyStatus(190, Opc.Ua.RedundancySupport.Hot);
+                            sl = 190;
+                            Console.WriteLine("Set service level to 190");
+                        }
+                        if (key.Key == ConsoleKey.H && sl != 255)
+                        {
+                            server.SetServerRedundancyStatus(255, Opc.Ua.RedundancySupport.Hot);
+                            sl = 255;
+                            Console.WriteLine("Set service level to 255");
+                        }
+                        if (key.Key == ConsoleKey.G && sl != 180)
+                        {
+                            server.SetServerRedundancyStatus(180, Opc.Ua.RedundancySupport.Hot);
+                            sl = 180;
+                            Console.WriteLine("Set service level to 180");
+                        }
+                        if (key.Key == ConsoleKey.X)
+                        {
+                            server.Server.DropSubscriptions();
+                        }
                     }
-                    if (key.Key == ConsoleKey.H && sl != 255)
-                    {
-                        server.SetServerRedundancyStatus(255, Opc.Ua.RedundancySupport.Hot);
-                        sl = 255;
-                        Console.WriteLine("Set service level to 255");
-                    }
-                    if (key.Key == ConsoleKey.G && sl != 180)
-                    {
-                        server.SetServerRedundancyStatus(180, Opc.Ua.RedundancySupport.Hot);
-                        sl = 180;
-                        Console.WriteLine("Set service level to 180");
-                    }
-                }
+                });
+            }
 
-            });
 
             exitEvent.WaitOne();
         }

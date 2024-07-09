@@ -55,8 +55,8 @@ namespace Cognite.OpcUa
         /// <param name="vt">Value to set</param>
         public void UpdateMetricValue(Variant vt)
         {
-            var dp = dt.ToDataPoint(client, vt, DateTime.UtcNow, Id);
-            if (dp.IsString) return;
+            var dp = dt.ToDataPoint(client, vt, DateTime.UtcNow, Id, StatusCodes.Good);
+            if (dp.IsString || !dp.DoubleValue.HasValue) return;
             metric.Set(dp.DoubleValue.Value);
         }
     }
@@ -151,13 +151,14 @@ namespace Cognite.OpcUa
                 metrics[nodes[i]] = state;
             }
 
-            if (!metrics.Any()) return;
+            if (metrics.Count == 0) return;
 
             if (client.SubscriptionManager == null) throw new InvalidOperationException("Client not initialized");
 
             client.SubscriptionManager.EnqueueTask(new NodeMetricsSubscriptionTask(
                 SubscriptionHandler,
-                metrics));
+                metrics,
+                client.Callbacks));
         }
         /// <summary>
         /// Converts datapoint callback to metric value

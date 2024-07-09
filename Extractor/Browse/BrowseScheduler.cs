@@ -30,7 +30,7 @@ namespace Cognite.OpcUa
 {
     internal class DirectoryBrowseParams
     {
-        public IEnumerable<NodeFilter>? Filters { get; set; }
+        public TransformationCollection? Transformations { get; set; }
         public Action<ReferenceDescription, NodeId, bool>? Callback { get; set; }
         public int NodesChunk { get; set; }
         public int MaxNodeParallelism { get; set; }
@@ -43,7 +43,7 @@ namespace Cognite.OpcUa
         private readonly UAClient client;
         private readonly DirectoryBrowseParams options;
 
-        private readonly IEnumerable<NodeFilter>? filters;
+        private readonly TransformationCollection? transformations;
 
         private readonly Action<ReferenceDescription, NodeId, bool>? callback;
         private readonly ISet<NodeId> localVisitedNodes = new HashSet<NodeId>();
@@ -85,8 +85,8 @@ namespace Cognite.OpcUa
 
             baseParams = options.InitialParams;
 
-            filters = options.Filters;
-            if (baseParams.Nodes.Any())
+            transformations = options.Transformations;
+            if (baseParams.Nodes.Count != 0)
             {
                 foreach (var node in baseParams.Nodes)
                 {
@@ -100,11 +100,11 @@ namespace Cognite.OpcUa
 
 
 
-        protected override void AbortChunk(IChunk<BrowseNode> chunk, CancellationToken token)
+        protected override async Task AbortChunk(IChunk<BrowseNode> chunk, CancellationToken token)
         {
             try
             {
-                client.AbortBrowse(chunk.Items).Wait(CancellationToken.None);
+                await client.AbortBrowse(chunk.Items);
             }
             catch (Exception e)
             {
@@ -139,12 +139,11 @@ namespace Cognite.OpcUa
         /// <returns>True if the node should be kept</returns>
         public bool NodeFilter(string displayName, NodeId id, NodeId typeDefinition, NodeClass nc)
         {
-            if (filters == null) return true;
-            if (filters.Any(filter => filter.IsBasicMatch(displayName, id, typeDefinition, client.NamespaceTable!, nc))) return false;
-            return true;
+            if (transformations == null) return true;
+            return transformations.ShouldIncludeBasic(displayName, id, typeDefinition, client.NamespaceTable, nc);
         }
 
-        protected override IEnumerable<BrowseNode> HandleTaskResult(IChunk<BrowseNode> chunk, CancellationToken token)
+        protected override async Task<IEnumerable<BrowseNode>> HandleTaskResult(IChunk<BrowseNode> chunk, CancellationToken token)
         {
             var result = new List<BrowseNode>();
 
@@ -153,7 +152,7 @@ namespace Cognite.OpcUa
                 ExtractorUtils.LogException(log, chunk.Exception, $"Unexpected failure during browse{purpose}");
                 failed = true;
                 exceptions.Add(chunk.Exception);
-                AbortChunk(chunk, token);
+                await AbortChunk(chunk, token);
                 return Enumerable.Empty<BrowseNode>();
             }
 
@@ -169,7 +168,7 @@ namespace Cognite.OpcUa
                 {
                     if (rd.NodeId.ServerIndex != 0) continue;
                     var nodeId = client.ToNodeId(rd.NodeId);
-                    if (nodeId == ObjectIds.Server || nodeId == ObjectIds.Aliases) continue;
+                    if (nodeId == ObjectIds.Server || nodeId == ObjectIds.Aliases || nodeId == ObjectIds.Locations) continue;
                     if (!NodeFilter(rd.DisplayName.Text, client.ToNodeId(rd.TypeDefinition), nodeId, rd.NodeClass))
                     {
                         log.LogTrace("Ignoring filtered {NodeId}", nodeId);
@@ -212,7 +211,7 @@ namespace Cognite.OpcUa
             }
             await base.RunAsync();
             LogBrowseResult();
-            if (exceptions.Any())
+            if (exceptions.Count != 0)
             {
                 throw new AggregateException(exceptions);
             }

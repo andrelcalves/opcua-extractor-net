@@ -2,6 +2,7 @@
 using Cognite.Extractor.Testing;
 using Cognite.OpcUa;
 using Cognite.OpcUa.Config;
+using Cognite.OpcUa.History;
 using Cognite.OpcUa.Subscriptions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -189,12 +190,15 @@ namespace Test.Integration
             tester.Config.History.Enabled = true;
             tester.Config.History.Backfill = true;
             tester.Config.Events.History = true;
+            tester.Config.Subscriptions.RecreateSubscriptionGracePeriod = "100ms";
 
             async Task Reset()
             {
                 extractor.State.Clear();
                 extractor.GetType().GetField("subscribed", BindingFlags.NonPublic | BindingFlags.Instance).SetValue(extractor, 0);
                 extractor.GetType().GetField("subscribeFlag", BindingFlags.NonPublic | BindingFlags.Instance).SetValue(extractor, false);
+                var reader = (HistoryReader)extractor.GetType().GetField("historyReader", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(extractor);
+                reader.AddIssue(HistoryReader.StateIssue.NodeHierarchyRead);
                 await tester.RemoveSubscription(SubscriptionName.Events);
             }
 
@@ -212,7 +216,7 @@ namespace Test.Integration
             Assert.All(extractor.State.EmitterStates, state => { Assert.True(state.ShouldSubscribe); });
             await extractor.WaitForSubscriptions();
             Assert.Equal(3u, session.Subscriptions.First(sub => sub.DisplayName.StartsWith(SubscriptionName.Events.Name(), StringComparison.InvariantCulture)).MonitoredItemCount);
-            await TestUtils.WaitForCondition(() => CommonTestUtils.TestMetricValue("opcua_frontfill_events_count", 1), 5);
+            await TestUtils.WaitForCondition(() => extractor.State.EmitterStates.All(s => !s.IsFrontfilling), 10);
 
             // Test disable subscriptions
             await Reset();
@@ -224,7 +228,7 @@ namespace Test.Integration
             Assert.False(state.ShouldSubscribe);
             await extractor.WaitForSubscriptions();
             Assert.DoesNotContain(session.Subscriptions, sub => sub.DisplayName.StartsWith(SubscriptionName.Events.Name(), StringComparison.InvariantCulture));
-            await TestUtils.WaitForCondition(() => CommonTestUtils.TestMetricValue("opcua_frontfill_events_count", 2), 5);
+            await TestUtils.WaitForCondition(() => extractor.State.EmitterStates.All(s => !s.IsFrontfilling), 10);
 
             // Test disable specific subscriptions
             await Reset();
@@ -233,9 +237,9 @@ namespace Test.Integration
             {
                 new RawNodeTransformation
                 {
-                    Filter = new RawNodeFilter
+                    Filter = new NodeFilter
                     {
-                        Id = $"i={ids.Obj1.Identifier}$"
+                        Id = new RegexFieldFilter($"i={ids.Obj1.Identifier}$")
                     },
                     Type = TransformationType.DropSubscriptions
                 }
@@ -249,7 +253,7 @@ namespace Test.Integration
             Assert.True(state.ShouldSubscribe);
             await extractor.WaitForSubscriptions();
             Assert.Equal(2u, session.Subscriptions.First(sub => sub.DisplayName.StartsWith(SubscriptionName.Events.Name(), StringComparison.InvariantCulture)).MonitoredItemCount);
-            await TestUtils.WaitForCondition(() => CommonTestUtils.TestMetricValue("opcua_frontfill_events_count", 3), 5);
+            await TestUtils.WaitForCondition(() => extractor.State.EmitterStates.All(s => !s.IsFrontfilling), 10);
         }
         #endregion
 
@@ -342,12 +346,7 @@ namespace Test.Integration
             tester.Server.PopulateEvents(now.AddSeconds(5));
             tester.Server.PopulateEvents(now.AddSeconds(-15));
 
-            foreach (var state in extractor.State.EmitterStates)
-            {
-                state.RestartHistory();
-            }
-
-            await extractor.RestartHistory();
+            await extractor.RestartHistoryWaitForStop();
 
             await TestUtils.WaitForCondition(() => pusher.Events.Count == 2 && pusher.Events[ObjectIds.Server].Count == 1407
                 && pusher.Events[ids.Obj1].Count == 402, 5,
@@ -576,7 +575,7 @@ namespace Test.Integration
                 && extractor.State.EmitterStates.All(state => !state.IsFrontfilling), 5,
                 () => $"Pusher is dataFailing: {pusher.DataFailing}");
 
-            Assert.True(pusher.DataPoints.All(dps => !dps.Value.Any()));
+            Assert.True(pusher.DataPoints.All(dps => dps.Value.Count == 0));
 
             tester.Server.TriggerEvents(100);
 

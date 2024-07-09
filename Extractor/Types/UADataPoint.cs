@@ -16,11 +16,15 @@ along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA. */
 
 using Cognite.Extensions;
+using CogniteSdk;
+using Microsoft.Extensions.Logging;
+using Opc.Ua;
 using System;
 using System.Collections.Generic;
-using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.IO;
+using System.Text;
+using StatusCode = Opc.Ua.StatusCode;
 
 namespace Cognite.OpcUa.Types
 {
@@ -33,26 +37,31 @@ namespace Cognite.OpcUa.Types
         public string Id { get; }
         public double? DoubleValue { get; }
         public string? StringValue { get; }
-        [MemberNotNullWhen(false, nameof(DoubleValue))]
-        [MemberNotNullWhen(true, nameof(StringValue))]
-        public bool IsString => !DoubleValue.HasValue;
+
+        public bool IsString { get; }
+
+        public StatusCode Status { get; }
         /// <param name="timestamp">Timestamp in ms since epoch</param>
         /// <param name="id">Converted id of node this belongs to, equal to externalId of timeseries in CDF</param>
         /// <param name="value">Value to set</param>
-        public UADataPoint(DateTime timestamp, string id, double value)
+        public UADataPoint(DateTime timestamp, string id, double value, StatusCode status)
         {
             Timestamp = timestamp;
             Id = id;
             DoubleValue = value;
+            Status = status;
+            IsString = false;
         }
         /// <param name="timestamp">Timestamp in ms since epoch</param>
         /// <param name="id">Converted id of node this belongs to, equal to externalId of timeseries in CDF</param>
         /// <param name="value">Value to set</param>
-        public UADataPoint(DateTime timestamp, string id, string? value)
+        public UADataPoint(DateTime timestamp, string id, string? value, StatusCode status)
         {
             Timestamp = timestamp;
             Id = id;
             StringValue = value;
+            Status = status;
+            IsString = true;
         }
         /// <summary>
         /// Copy given datapoint with given replacement value
@@ -64,6 +73,8 @@ namespace Cognite.OpcUa.Types
             Timestamp = other.Timestamp;
             Id = other.Id;
             StringValue = replacement;
+            Status = other.Status;
+            IsString = true;
         }
         /// <summary>
         /// Copy given datapoint with given replacement value
@@ -75,7 +86,56 @@ namespace Cognite.OpcUa.Types
             Timestamp = other.Timestamp;
             Id = other.Id;
             DoubleValue = replacement;
+            Status = other.Status;
+            IsString = false;
         }
+
+        /// <summary>
+        /// Create a data point with null value.
+        /// </summary>
+        /// <param name="timestamp">Timestamp</param>
+        /// <param name="id">Converted id of node this belongs to</param>
+        /// <param name="isString">Whether this datapoint is for a string data type</param>
+        /// <param name="status">Status code</param>
+        public UADataPoint(DateTime timestamp, string id, bool isString, StatusCode status)
+        {
+            Timestamp = timestamp;
+            Id = id;
+            IsString = isString;
+            Status = status;
+        }
+
+
+        public Datapoint? ToCDFDataPoint(bool includeStatusCodes, ILogger logger)
+        {
+            Extensions.StatusCode? status = null;
+            if (includeStatusCodes)
+            {
+                var res = Extensions.StatusCode.TryCreate(Status.Code, out status);
+                if (res != null)
+                {
+                    logger.LogWarning("Invalid status code, skipping data point: {Status}", res);
+                    return null;
+                }
+            }
+
+            if (!IsString)
+            {
+                if (DoubleValue.HasValue)
+                {
+                    return new Datapoint(Timestamp, DoubleValue.Value, status);
+                }
+                else
+                {
+                    return new Datapoint(Timestamp, false, status);
+                }
+            }
+            else
+            {
+                return new Datapoint(Timestamp, StringValue);
+            }
+        }
+
         /// <summary>
         /// Converts datapoint into an array of bytes which may be written to file.
         /// The structure is as follows: ushort size | unknown encoding string externalid | double value | long timestamp
@@ -88,10 +148,11 @@ namespace Cognite.OpcUa.Types
         /// <returns>Array of bytes</returns>
         public byte[] ToStorableBytes()
         {
-            var bytes = new List<byte>(16);
+            var bytes = new List<byte>(20);
             bytes.AddRange(CogniteUtils.StringToStorable(Id));
             bytes.AddRange(BitConverter.GetBytes(Timestamp.ToBinary()));
             bytes.AddRange(BitConverter.GetBytes(IsString));
+            bytes.AddRange(BitConverter.GetBytes(Status.Code));
 
             if (IsString)
             {
@@ -99,7 +160,15 @@ namespace Cognite.OpcUa.Types
             }
             else
             {
-                bytes.AddRange(BitConverter.GetBytes(DoubleValue.Value));
+                if (DoubleValue.HasValue)
+                {
+                    bytes.AddRange(BitConverter.GetBytes(true));
+                    bytes.AddRange(BitConverter.GetBytes(DoubleValue.Value));
+                }
+                else
+                {
+                    bytes.AddRange(BitConverter.GetBytes(false));
+                }
             }
 
             return bytes.ToArray();
@@ -116,24 +185,55 @@ namespace Cognite.OpcUa.Types
             var buffer = new byte[sizeof(long)];
             if (stream.Read(buffer, 0, sizeof(long)) < sizeof(long)) return null;
             DateTime ts = DateTime.FromBinary(BitConverter.ToInt64(buffer, 0));
+
             if (stream.Read(buffer, 0, sizeof(bool)) < sizeof(bool)) return null;
             bool isstr = BitConverter.ToBoolean(buffer, 0);
+
+            if (stream.Read(buffer, 0, sizeof(uint)) < sizeof(uint)) return null;
+            var status = new StatusCode(BitConverter.ToUInt32(buffer, 0));
+
             if (isstr)
             {
                 var value = CogniteUtils.StringFromStream(stream);
-                return new UADataPoint(ts, id, value);
+                return new UADataPoint(ts, id, value, status);
             }
             else
             {
-                if (stream.Read(buffer, 0, sizeof(double)) < sizeof(double)) return null;
-                var value = BitConverter.ToDouble(buffer, 0);
-                return new UADataPoint(ts, id, value);
+                if (stream.Read(buffer, 0, sizeof(bool)) < sizeof(bool)) return null;
+                var hasValue = BitConverter.ToBoolean(buffer, 0);
+
+                if (hasValue)
+                {
+                    if (stream.Read(buffer, 0, sizeof(double)) < sizeof(double)) return null;
+                    var value = BitConverter.ToDouble(buffer, 0);
+                    return new UADataPoint(ts, id, value, status);
+                }
+                else
+                {
+                    return new UADataPoint(ts, id, false, status);
+                }
+
             }
         }
         public override string ToString()
         {
-            return $"Update timeseries {Id} to {(IsString ? "\"" + StringValue + "\"" : DoubleValue.Value.ToString(CultureInfo.InvariantCulture))}" +
-                   $" at {Timestamp.ToString(CultureInfo.InvariantCulture)}";
+            var builder = new StringBuilder();
+
+            builder.AppendFormat("Update timeseries {0} to ", Id);
+
+            if (IsString)
+            {
+                builder.AppendFormat("\"{0}\"", StringValue);
+            }
+            else
+            {
+                builder.AppendFormat("{0}", DoubleValue);
+            }
+
+            builder.AppendFormat(" at {0}", Timestamp.ToString(CultureInfo.InvariantCulture));
+            builder.AppendFormat(" with status {0}", StatusCode.LookupSymbolicId(Status.Code));
+
+            return builder.ToString();
         }
     }
 }

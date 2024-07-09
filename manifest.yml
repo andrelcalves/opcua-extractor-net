@@ -44,7 +44,7 @@ extractor:
       url: "https://docs.cognite.com/cdf/integration/guides/extraction/opc_ua/opc_ua_cli"
       type: "externalDocumentation"
     - name: Configuration
-      url: "https://docs.cognite.com/cdf/integration/guides/extraction/opc_ua/opc_ua_configuration"
+      url: "https://docs.cognite.com/cdf/integration/guides/extraction/configuration/opcua"
       type: "externalDocumentation"
     - name: Metrics
       url: "https://docs.cognite.com/cdf/integration/guides/extraction/opc_ua/opc_ua_metrics"
@@ -54,12 +54,142 @@ extractor:
       type: "externalDocumentation"
   image: opc-ua.png
 
+documentation:
+  includeLeafNodes: false
+  preamble:
+    - docs/preamble.md
+    - docs/keyvault.md
+    - docs/header.md
+
 schema:
   rootSchema: schema/full_config.schema.json
   additionalUris:
    - "https://raw.githubusercontent.com/"
 
 versions:
+  "2.30.1":
+    description: Always set history end time.
+    changelog:
+      changed:
+        - History end time is now always set in read requests to the server, even if history.end-time is not configured.
+  "2.30.0":
+    description: Add support for configuring filters from a list of values.
+    changelog:
+      added:
+        - Add support for configuring filters from a list of values contained either directly in config, or in a local file.
+  "2.29.1":
+    description: Log more related to continuation points.
+    changelog:
+      changed:
+        - Added more logging related to continuation point and history termination.
+  "2.29.0":
+    description: Full release of status codes on datapoints.
+    changelog:
+      changed:
+        - It is now possible to ingest null values for datapoints if the status is bad.
+      added:
+        - Added a filter type for only including filtered nodes.
+  "2.28.1":
+    description: Fix bug causing the extractor to fail to retry token requests.
+    changelog:
+      fixed:
+        - Properly retry failed token requests.
+  "2.28.0":
+    description: Limit the number of nodes and edges the extractor will buffer at a time.
+    changelog:
+      changed:
+        - The extractor will now never buffer more than 1 million datapoints, or 100 000 events.
+  "2.27.6":
+    description: Fixes edge-case caused by writing to FDM and clean at the same time.
+    changelog:
+      fixed:
+        - Fixed extractor failing to upload to clean when some nodes were included from outside the main tree.
+  "2.27.5":
+    description: Minor documentation updates.
+  "2.27.4":
+    description: Minor fixes to the FDM target prototype.
+    changelog:
+      fixed:
+        - Fixed issue causing errors on duplicate references in FDM writer.
+        - Fixed bug causing requests to fail on marking many raw rows as deleted.
+      added:
+        - Added configuration for controlling FDM chunk sizes.
+  "2.27.3":
+    description: Documentation updates.
+  "2.27.2":
+    description: Improve reliability of history restart triggers.
+  "2.27.1":
+    description: Enforce start-time < end-time when reading history, fix subscription recreation bug.
+    changelog:
+      changed:
+        - The extractor will now fail on startup if start-time is configured to be greater than end-time.
+      fixed:
+        - Fix a bug related to subscription recreation.
+  "2.27.0":
+    description: Beta support for status codes in time series.
+    changelog:
+      added:
+        - "Beta support for status codes in time series. Note that this may change without being considered a breaking change in the extractor."
+      changed:
+        - "The data format for the local failure buffer has changed. Any existing buffered datapoints will be discarded when the extractor is updated."
+  "2.26.1":
+    description: Improve logging around subscription recreation.
+  "2.26.0":
+    description: Configurable grace period for recreating dead subscriptions.
+    changelog:
+      added:
+        - "subscriptions.recreate-subscription-grace-period for grace period when recreating subscriptions"
+  "2.25.1":
+    description: Be less aggressive with history restart on dead subscriptions.
+    changelog:
+      changed:
+        - Only restart history after a subscription recovery grace period.
+  "2.25.0":
+    description: Restart history more consistently and in more cases. Add support for azure key vault.
+    changelog:
+      changed:
+        - Restart history when subscriptions are recreated.
+        - Stop history when any condition for not running history is satisfied, then start it once all conditions are satisfied.
+      added:
+        - "Support for azure key vault. Secrets are injected by adding a `key-vault` section to the config, and using the !keyvault [secretname] tag"
+  "2.24.1":
+    description: Fix Archive Release Builds
+    changelog:
+      fixed:
+        - "Fix for missing files in release archive(s)"
+  "2.24.0":
+    description: "Bugfixes and improvements"
+    changelog:
+      fixed:
+        - "fix: Allow empty array dimensions"
+  "2.23.0":
+    description: Update to .NET 8
+    changelog:
+      changed:
+        - "Update to .NET 8"
+      fixed:
+        - "Fix issue caused by dotnet runtime inconsistency when using the docker image."
+  "2.22.2":
+    description: Shut down history when service level goes bad, to avoid gaps if it goes back to good while history is still running.
+  "2.22.1":
+    description: Fix issue causing the extractor to try to create very many monitored items at the same time.
+    changelog:
+      fixed:
+        - "Fix to issue related to recreating subscriptions with lots of monitored items. The extractor would sometimes try to create all monitored items in a single request, which would invariably fail."
+  "2.22.0":
+    description: Reliability improvements and some minor additions
+    changelog:
+      added:
+        - "Persist namespace publication date between extractor restarts"
+        - "Log request id by default on every request to CDF"
+      changed:
+        - "Always attempt to reconnect to the server on connection loss. force-restart now only makes it so that the extractor doesn't _retry_ on reconnects, and can be disabled in many more cases. It is no longer necessary for redundancy."
+        - "root-node no longer falls back on the objects folder if the namespace is invalid."
+      fixed:
+        - "Fix a bug causing asset IDs on timeseries to not work properly in some cases"
+        - "Properly clear the delete marker on resources that have been restored on the server"
+        - "Improve logging of errors if the extractor restarts due to exceeding history failure threshold"
+        - "Fix a bug causing max-node-parallelism to not be properly set from server limits. This is mostly relevant for extractor deployments not using config generated by the config tool"
   "2.21.2":
     description: Reliability improvements
     changelog:

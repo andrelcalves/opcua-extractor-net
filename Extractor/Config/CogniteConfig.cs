@@ -266,9 +266,10 @@ namespace Cognite.OpcUa.Config
         public bool Enabled { get; set; }
 
         /// <summary>
-        /// Enum for which types to map to FDM
-        /// 
-        /// TODO: Currently does nothing
+        /// Enum for which types to map to FDM.
+        /// Note that setting this to "All" tends to not work that well. It is rarely something you want.
+        /// The extractor can handle it, but it will produce a lot of types, and no application will ever need all of them.
+        /// Still, it is easy to add for completeness.
         /// </summary>
         public TypesToMap TypesToMap { get; set; } = TypesToMap.Custom;
 
@@ -277,11 +278,6 @@ namespace Cognite.OpcUa.Config
         /// Simplifies the model greatly.
         /// </summary>
         public bool SkipSimpleTypes { get; set; }
-
-        /// <summary>
-        /// Do not ingest views if the number of views in the data model is equal to the number of views in OPC-UA.
-        /// </summary>
-        public bool SkipTypesOnEqualCount { get; set; }
 
         /// <summary>
         /// Let mandatory options be nullable.
@@ -295,5 +291,27 @@ namespace Cognite.OpcUa.Config
         /// Useful for certain schemas.
         /// </summary>
         public Dictionary<string, string>? ConnectionTargetMap { get; set; }
+
+        /// <summary>
+        /// Enable deleting FDM nodes. These are generally hard deletes.
+        /// Will only delete nodes extracted as part of the instance hierarchy.
+        /// Types, and type-related nodes will not be deleted.
+        /// </summary>
+        public bool EnableDeletes { get; set; }
+
+        /// <summary>
+        /// Maximum number of parallel instance insertion requests.
+        /// </summary>
+        public int InstanceParallelism { get; set; } = 4;
+
+        /// <summary>
+        /// Number of instances per instance create request.
+        /// </summary>
+        public int InstanceChunk { get; set; } = 1000;
+
+        /// <summary>
+        /// Number of views and containers per create request.
+        /// </summary>
+        public int ModelChunk { get; set; } = 100;
     }
 }

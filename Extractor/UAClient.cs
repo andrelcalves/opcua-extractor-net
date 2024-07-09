@@ -235,7 +235,7 @@ namespace Cognite.OpcUa
 
             if (SubscriptionManager == null)
             {
-                SubscriptionManager = new SubscriptionManager(SessionManager, Config, log);
+                SubscriptionManager = new SubscriptionManager(this, Config, log);
                 Callbacks.TaskScheduler.ScheduleTask("SubscriptionManager", SubscriptionManager.RunTaskLoop);
             }
 
@@ -363,7 +363,7 @@ namespace Cognite.OpcUa
 
             using var operation = waiter.GetInstance();
 
-            if (toBrowse.Any())
+            if (toBrowse.Count != 0)
             {
                 var results = await RetryUtil.RetryResultAsync("browse", async () => await GetReferencesChunk(browseParams, toBrowse, token), Config.Source.Retries, Config.Source.Retries.ShouldRetryException, log, token);
 
@@ -371,7 +371,7 @@ namespace Cognite.OpcUa
                 if (readToCompletion) toBrowseNext.AddRange(next);
             }
 
-            while (toBrowseNext.Any())
+            while (toBrowseNext.Count != 0)
             {
                 var results = await RetryUtil.RetryResultAsync("browse next", async () => await GetNextReferencesChunk(toBrowseNext, token), Config.Source.Retries, Config.Source.Retries.ShouldRetryException, log, token);
 
@@ -458,7 +458,7 @@ namespace Cognite.OpcUa
         {
             if (Session == null) throw new ServiceCallFailureException("Session is not connected", ServiceCallFailure.SessionMissing);
             var toAbort = nodes.Where(node => node.ContinuationPoint != null).ToList();
-            if (!toAbort.Any()) return;
+            if (toAbort.Count == 0) return;
             var cps = new ByteStringCollection(nodes.Select(node => node.ContinuationPoint));
             try
             {
@@ -660,6 +660,7 @@ namespace Cognite.OpcUa
                     NodeId = node.Id,
                     ContinuationPoint = node.ContinuationPoint
                 });
+                node.ContinuationPoint = null;
             }
             if (!ids.Any()) return;
 
@@ -681,12 +682,6 @@ namespace Cognite.OpcUa
                     true,
                     ids,
                     token);
-
-                foreach (var node in readParams.Nodes)
-                {
-                    node.ContinuationPoint = null;
-                    node.Completed = true;
-                }
             }
             catch (ServiceResultException ex)
             {
@@ -742,15 +737,7 @@ namespace Cognite.OpcUa
                 LogDump("HistoryRead data", data);
 
                 node.LastResult = ExtensionObject.ToEncodeable(data.HistoryData);
-                if (data.ContinuationPoint == null)
-                {
-                    node.Completed = true;
-                    node.ContinuationPoint = null;
-                }
-                else
-                {
-                    node.ContinuationPoint = data.ContinuationPoint;
-                }
+                node.ContinuationPoint = data.ContinuationPoint;
             }
 
             log.LogDebug("Fetched historical {Type} for {NodeCount} nodes",
@@ -804,7 +791,7 @@ namespace Cognite.OpcUa
              */
             var whereClause = new ContentFilter();
 
-            if (eventFields.Keys.Any() && ((Config.Events.EventIds?.Any() ?? false) || !Config.Events.AllEvents))
+            if (eventFields.Keys.Count != 0 && ((Config.Events.EventIds?.Any() ?? false) || !Config.Events.AllEvents))
             {
                 log.LogDebug("Limit event results to the following ids: {Ids}", string.Join(", ", eventFields.Keys));
                 var eventListOperand = new SimpleAttributeOperand

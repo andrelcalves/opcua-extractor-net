@@ -170,17 +170,22 @@ namespace Cognite.OpcUa.Nodes
         /// <param name="value">Value to convert</param>
         /// <param name="timestamp">Timestamp of created datapoint</param>
         /// <param name="id">Id of created datapoint</param>
-        /// <param name="stringOverride">True to override the IsString parameter of this datatype, converting 
+        /// <param name="stringOverride">True to override the IsString parameter of this datatype, converting
         /// numerical datavalues to string as well.</param>
         /// <returns>Created UADataPoint</returns>
-        public UADataPoint ToDataPoint(IUAClientAccess client, object value, DateTime timestamp, string id, bool stringOverride = false)
+        public UADataPoint ToDataPoint(IUAClientAccess client, object value, DateTime timestamp, string id, StatusCode status, bool stringOverride = false)
         {
             if (timestamp == DateTime.MinValue) timestamp = DateTime.UtcNow;
+            if (value is null)
+            {
+                return new UADataPoint(timestamp, id, IsString, status);
+            }
+
             if (IsString || stringOverride)
             {
-                return new UADataPoint(timestamp, id, client.StringConverter.ConvertToString(value, EnumValues));
+                return new UADataPoint(timestamp, id, client.StringConverter.ConvertToString(value, EnumValues), status);
             }
-            return new UADataPoint(timestamp, id, UAClient.ConvertToDouble(value));
+            return new UADataPoint(timestamp, id, UAClient.ConvertToDouble(value), status);
         }
 
         public override string ToString()
@@ -238,10 +243,14 @@ namespace Cognite.OpcUa.Nodes
                     return false;
                 }
             }
-            else if (node.ArrayDimensions == null)
+            // Check for null ArrayDimensions or empty array
+            else if (node.ArrayDimensions == null || node.ArrayDimensions.Length == 0)
             {
                 if (config.UnknownAsScalar && (node.ValueRank == ValueRanks.ScalarOrOneDimension
-                    || node.ValueRank == ValueRanks.Any)) return true;
+                    || node.ValueRank == ValueRanks.Any))
+                {
+                    return true;
+                }
                 log.LogDebug("Skipping variable {Name} {Id} due to non-scalar ValueRank {Rank} and null ArrayDimensions",
                     node.Name, node.Id, ExtractorUtils.GetValueRankString(node.ValueRank));
                 return false;

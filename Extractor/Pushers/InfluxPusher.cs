@@ -94,13 +94,14 @@ namespace Cognite.OpcUa
             foreach (var lBuffer in points)
             {
                 var buffer = lBuffer;
-                if (buffer.Timestamp < minTs || buffer.Timestamp > maxTs)
+                if (buffer.Timestamp < minTs || buffer.Timestamp > maxTs
+                    || !buffer.DoubleValue.HasValue && buffer.StringValue is null)
                 {
                     skippedDatapoints.Inc();
                     continue;
                 }
 
-                if (!buffer.IsString && !double.IsFinite(buffer.DoubleValue.Value))
+                if (!buffer.IsString && buffer.DoubleValue.HasValue && !double.IsFinite(buffer.DoubleValue.Value))
                 {
                     if (config.NonFiniteReplacement != null)
                     {
@@ -259,17 +260,17 @@ namespace Cognite.OpcUa
                 var last = await client.QueryMultiSeriesAsync(config.Database,
                     $"SELECT last(value) FROM \"{id}\"");
 
-                if (last.Any() && last.First().HasEntries)
+                if (last.Count != 0 && last.First().HasEntries)
                 {
                     DateTime ts = last.First().Entries[0].Time;
                     ranges[id] = new TimeRange(ts, ts);
                 }
 
-                if (backfillEnabled && last.Any() && last.First().HasEntries)
+                if (backfillEnabled && last.Count != 0 && last.First().HasEntries)
                 {
                     var first = await client.QueryMultiSeriesAsync(config.Database,
                         $"SELECT first(value) FROM \"{id}\"");
-                    if (first.Any() && first.First().HasEntries)
+                    if (first.Count != 0 && first.First().HasEntries)
                     {
                         DateTime ts = first.First().Entries[0].Time;
                         ranges[id] = new TimeRange(ts, ranges[id].Last);
@@ -351,7 +352,7 @@ namespace Cognite.OpcUa
                 var last = await client.QueryMultiSeriesAsync(config.Database,
                     $"SELECT last(value) FROM \"{id}\"");
 
-                if (last.Any() && last.First().HasEntries)
+                if (last.Count != 0 && last.First().HasEntries)
                 {
                     DateTime ts = last.First().Entries[0].Time;
                     lock (mutex)
@@ -362,10 +363,10 @@ namespace Cognite.OpcUa
 
                 if (backfillEnabled)
                 {
-                    if (!last.Any()) return;
+                    if (last.Count == 0) return;
                     var first = await client.QueryMultiSeriesAsync(config.Database,
                         $"SELECT first(value) FROM \"{id}\"");
-                    if (first.Any() && first.First().HasEntries)
+                    if (first.Count != 0 && first.First().HasEntries)
                     {
                         DateTime ts = first.First().Entries[0].Time;
                         lock (mutex)
@@ -599,7 +600,7 @@ namespace Cognite.OpcUa
 
             foreach (var series in results)
             {
-                if (!series.Any()) continue;
+                if (series.Count == 0) continue;
                 var current = series.First();
                 string id = current.SeriesName;
                 if (!states.TryGetValue(id, out var state)) continue;
@@ -608,7 +609,7 @@ namespace Cognite.OpcUa
                 {
                     if (isString)
                     {
-                        return new UADataPoint(dp.Time, id, (string)dp.Value);
+                        return new UADataPoint(dp.Time, id, (string)dp.Value, StatusCodes.Good);
                     }
 
                     double convVal;
@@ -621,7 +622,7 @@ namespace Cognite.OpcUa
                         convVal = Convert.ToDouble(dp.Value);
                     }
 
-                    return new UADataPoint(dp.Time, id, convVal);
+                    return new UADataPoint(dp.Time, id, convVal, StatusCodes.Good);
                 }));
             }
 

@@ -23,6 +23,7 @@ using System.Threading.Tasks;
 using Test.Utils;
 using Xunit;
 using Xunit.Abstractions;
+using Cognite.Extractor.Configuration;
 
 namespace Test.Unit
 {
@@ -38,6 +39,13 @@ namespace Test.Unit
         public UAClientTestFixture()
         {
             var services = new ServiceCollection();
+
+            try
+            {
+                ConfigurationUtils.AddTypeConverter(new FieldFilterConverter());
+            }
+            catch { }
+
             Config = services.AddConfig<FullConfig>("config.test.yml", 1);
             Config.Source.EndpointUrl = $"opc.tcp://localhost:62000";
             Configure(services);
@@ -83,9 +91,13 @@ namespace Test.Unit
 
         public async Task DisposeAsync()
         {
-            Source.Cancel();
+            if (Source != null)
+            {
+                await Source.CancelAsync();
+                Source.Dispose();
+                Source = null;
+            }
             await Client.Close(CancellationToken.None);
-            Source.Dispose();
             Server.Stop();
             await Provider.DisposeAsync();
         }
@@ -143,7 +155,7 @@ namespace Test.Unit
             try
             {
                 var exc = await Assert.ThrowsAsync<SilentServiceException>(() => tester.Client.Run(tester.Source.Token, 0));
-                Assert.Equal(StatusCodes.BadNotConnected, exc.StatusCode);
+                Assert.Equal(StatusCodes.BadNoCommunication, exc.StatusCode);
                 Assert.Equal(ExtractorUtils.SourceOp.SelectEndpoint, exc.Operation);
             }
             finally
@@ -267,7 +279,7 @@ namespace Test.Unit
                 tester.Config.Source.Username = "testuser";
                 tester.Config.Source.Password = "wrongpassword";
 
-                await Assert.ThrowsAsync<SilentServiceException>(async () => await tester.Client.Run(tester.Source.Token, 0));
+                await Assert.ThrowsAsync<SilentServiceException>((Func<Task>)(async () => await tester.Client.Run(tester.Source.Token, 0)));
 
                 tester.Config.Source.Password = "testpassword";
 
@@ -349,6 +361,7 @@ namespace Test.Unit
             tester.Server.SetServerRedundancyStatus(230, RedundancySupport.Hot);
             tester.Config.Source.Redundancy.MonitorServiceLevel = true;
             tester.Callbacks.Reset();
+            tester.Client.Callbacks = tester.Callbacks;
             var altServer = new ServerController(new[] {
                 PredefinedSetup.Base
             }, tester.Provider, 62300)
@@ -375,7 +388,7 @@ namespace Test.Unit
                 await TestUtils.WaitForCondition(() => sm.CurrentServiceLevel == 230, 10, "Expected session to reconnect to original server");
 
                 Assert.Equal(230, sm.CurrentServiceLevel);
-                Assert.Equal(0, tester.Callbacks.ServiceLevelCbCount);
+                Assert.Equal(1, tester.Callbacks.ServiceLevelCbCount);
                 Assert.Equal(1, tester.Callbacks.LowServiceLevelCbCount);
                 Assert.Equal(1, tester.Callbacks.ReconnectCbCount);
                 Assert.Equal(sm.EndpointUrl, tester.Config.Source.EndpointUrl);
@@ -395,7 +408,7 @@ namespace Test.Unit
 
                 // Set the servicelevel back up, should trigger a callback, but no switch
                 tester.Server.SetServerRedundancyStatus(255, RedundancySupport.Hot);
-                await TestUtils.WaitForCondition(() => tester.Callbacks.ServiceLevelCbCount == 1, 10);
+                await TestUtils.WaitForCondition(() => tester.Callbacks.ServiceLevelCbCount == 2, 10);
                 Assert.Equal(sm.EndpointUrl, tester.Config.Source.EndpointUrl);
                 Assert.Equal(255, sm.CurrentServiceLevel);
             }
@@ -432,7 +445,7 @@ namespace Test.Unit
                 Nodes = new Dictionary<NodeId, BrowseNode> { { ObjectIds.ObjectsFolder, node } }
             }, true, tester.Source.Token);
             var children = node.Result.References;
-            Assert.Equal(8, children.Count);
+            Assert.Equal(9, children.Count);
 
             var nodes = children.ToDictionary(child => child.DisplayName.Text);
             var fullRoot = nodes["FullRoot"];
@@ -553,20 +566,23 @@ namespace Test.Unit
             CommonTestUtils.ResetMetricValues("opcua_browse_operations", "opcua_tree_depth");
             var (callback, nodes) = UAClientTestFixture.GetCallback();
 
-            tester.Client.Browser.IgnoreFilters = new List<NodeFilter>
+            tester.Client.Browser.Transformations = new TransformationCollection(new List<NodeTransformation>
             {
-                new NodeFilter(new RawNodeFilter
-                {
-                    Name = "WideRoot"
-                })
-            };
+                new NodeTransformation(new RawNodeTransformation {
+                    Filter = new NodeFilter
+                    {
+                        Name = new RegexFieldFilter("WideRoot")
+                    },
+                    Type = TransformationType.Ignore
+                }, 0)
+            });
             try
             {
                 await tester.Client.Browser.BrowseNodeHierarchy(tester.Server.Ids.Full.Root, callback, tester.Source.Token);
             }
             finally
             {
-                tester.Client.Browser.IgnoreFilters = null;
+                tester.Client.Browser.Transformations = null;
             }
             Assert.False(nodes.ContainsKey(tester.Server.Ids.Full.WideRoot));
             Assert.Equal(152, nodes.Aggregate(0, (seed, kvp) => seed + kvp.Value.Count));
@@ -579,13 +595,16 @@ namespace Test.Unit
             CommonTestUtils.ResetMetricValues("opcua_browse_operations", "opcua_tree_depth");
             var (callback, nodes) = UAClientTestFixture.GetCallback();
 
-            tester.Client.Browser.IgnoreFilters = new List<NodeFilter>
+            tester.Client.Browser.Transformations = new TransformationCollection(new List<NodeTransformation>
             {
-                new NodeFilter(new RawNodeFilter
-                {
-                    Name = "^Sub|^Deep"
-                })
-            };
+                new NodeTransformation(new RawNodeTransformation {
+                    Filter = new NodeFilter
+                    {
+                        Name = new RegexFieldFilter("^Sub|^Deep")
+                    },
+                    Type = TransformationType.Ignore
+                }, 0)
+            });
 
             try
             {
@@ -593,7 +612,7 @@ namespace Test.Unit
             }
             finally
             {
-                tester.Client.Browser.IgnoreFilters = null;
+                tester.Client.Browser.Transformations = null;
             }
             Assert.Equal(2, nodes.Aggregate(0, (seed, kvp) => seed + kvp.Value.Count));
             Assert.True(CommonTestUtils.TestMetricValue("opcua_browse_operations", 4));
@@ -618,7 +637,7 @@ namespace Test.Unit
             var distinctNodes = nodes.SelectMany(kvp => kvp.Value).GroupBy(rd => rd.NodeId);
 
             Assert.Equal(distinctNodes.Count(), nodes.Sum(kvp => kvp.Value.Count));
-            Assert.Equal(2710, nodes.Sum(kvp => kvp.Value.Count));
+            Assert.Equal(3117, nodes.Sum(kvp => kvp.Value.Count));
             Assert.True(CommonTestUtils.TestMetricValue("opcua_browse_operations", 11));
             Assert.True(CommonTestUtils.TestMetricValue("opcua_tree_depth", 11));
         }
@@ -653,10 +672,10 @@ namespace Test.Unit
             var (callback, nodes) = UAClientTestFixture.GetCallback();
 
             tester.Config.Source.Retries.MaxTries = 1;
-            tester.Server.Issues.RemainingBrowseCount = 6;
-            var ex = await Assert.ThrowsAsync<AggregateException>(async () =>
+            tester.Server.Issues.RemainingBrowse = 6;
+            var ex = await Assert.ThrowsAsync<AggregateException>((Func<Task>)(async () =>
                 await tester.Client.Browser.BrowseNodeHierarchy(tester.Server.Ids.Full.DeepRoot, callback, tester.Source.Token)
-            );
+            ));
 
             var root = ex.InnerException;
             Assert.IsType<SilentServiceException>(root);
@@ -916,8 +935,8 @@ namespace Test.Unit
             var nodes = new[]
             {
                 new UAVariable(tester.Server.Ids.Base.DoubleVar1, "DoubleVar1", null, null, tester.Server.Ids.Base.Root, null),
-                new UAVariable(new NodeId("missing-node"), "MissingNode", null, null, tester.Server.Ids.Base.Root, null),
-                new UAVariable(new NodeId("missing-node2"), "MissingNode2", null, null, tester.Server.Ids.Base.Root, null),
+                new UAVariable(new NodeId("missing-node", 0), "MissingNode", null, null, tester.Server.Ids.Base.Root, null),
+                new UAVariable(new NodeId("missing-node2", 0), "MissingNode2", null, null, tester.Server.Ids.Base.Root, null),
             };
 
             await tester.Client.ReadNodeData(nodes, tester.Source.Token);
@@ -966,7 +985,6 @@ namespace Test.Unit
                     var result = node.LastResult;
                     var historyData = result as HistoryData;
                     Assert.Equal(600, historyData.DataValues.Count);
-                    Assert.False(node.Completed);
                     Assert.NotNull(node.ContinuationPoint);
                 }
 
@@ -977,7 +995,7 @@ namespace Test.Unit
                     var result = node.LastResult;
                     var historyData = result as HistoryData;
                     Assert.Equal(400, historyData.DataValues.Count);
-                    Assert.True(node.Completed);
+                    Assert.Null(node.ContinuationPoint);
                 }
             }
             finally
@@ -1014,9 +1032,9 @@ namespace Test.Unit
 
             try
             {
-                await new DataPointSubscriptionTask(handler, nodes.Take(1000)).Run(tester.Logger,
+                await new DataPointSubscriptionTask(handler, nodes.Take(1000), tester.Callbacks).Run(tester.Logger,
                     tester.Client.SessionManager, tester.Config, tester.Client.SubscriptionManager, tester.Source.Token);
-                await new DataPointSubscriptionTask(handler, nodes.Skip(1000)).Run(tester.Logger,
+                await new DataPointSubscriptionTask(handler, nodes.Skip(1000), tester.Callbacks).Run(tester.Logger,
                     tester.Client.SessionManager, tester.Config, tester.Client.SubscriptionManager, tester.Source.Token);
 
                 await TestUtils.WaitForCondition(() => dps.Count == 2000, 5,
@@ -1113,7 +1131,7 @@ namespace Test.Unit
 
             try
             {
-                await new DataPointSubscriptionTask(handler, nodes).Run(tester.Logger,
+                await new DataPointSubscriptionTask(handler, nodes, tester.Callbacks).Run(tester.Logger,
                     tester.Client.SessionManager, tester.Config, tester.Client.SubscriptionManager, tester.Source.Token);
 
                 await TestUtils.WaitForCondition(() => dps.Count == 3, 5,
@@ -1174,9 +1192,9 @@ namespace Test.Unit
             {
                 await tester.Client.TypeManager.Initialize(uaNodeSource, tester.Source.Token);
 
-                await new EventSubscriptionTask(handler, emitters.Take(2), tester.Client.BuildEventFilter(tester.Client.TypeManager.EventFields))
+                await new EventSubscriptionTask(handler, emitters.Take(2), tester.Client.BuildEventFilter(tester.Client.TypeManager.EventFields), tester.Callbacks)
                     .Run(tester.Logger, tester.Client.SessionManager, tester.Config, tester.Client.SubscriptionManager, tester.Source.Token);
-                await new EventSubscriptionTask(handler, emitters.Skip(2), tester.Client.BuildEventFilter(tester.Client.TypeManager.EventFields))
+                await new EventSubscriptionTask(handler, emitters.Skip(2), tester.Client.BuildEventFilter(tester.Client.TypeManager.EventFields), tester.Callbacks)
                     .Run(tester.Logger, tester.Client.SessionManager, tester.Config, tester.Client.SubscriptionManager, tester.Source.Token);
 
                 tester.Server.TriggerEvents(0);
@@ -1222,7 +1240,7 @@ namespace Test.Unit
             try
             {
                 await tester.Client.TypeManager.Initialize(uaNodeSource, tester.Source.Token);
-                await new EventSubscriptionTask(handler, emitters, tester.Client.BuildEventFilter(tester.Client.TypeManager.EventFields))
+                await new EventSubscriptionTask(handler, emitters, tester.Client.BuildEventFilter(tester.Client.TypeManager.EventFields), tester.Callbacks)
                     .Run(tester.Logger, tester.Client.SessionManager, tester.Config, tester.Client.SubscriptionManager, tester.Source.Token);
 
                 tester.Server.TriggerEvents(0);
@@ -1256,7 +1274,7 @@ namespace Test.Unit
 
             try
             {
-                await new AuditSubscriptionTask(handler)
+                await new AuditSubscriptionTask(handler, tester.Callbacks)
                     .Run(tester.Logger, tester.Client.SessionManager, tester.Config, tester.Client.SubscriptionManager, tester.Source.Token);
 
                 tester.Server.DirectGrowth();
@@ -1284,7 +1302,7 @@ namespace Test.Unit
             Assert.Equal(new NodeId("string-ns", 2), tester.Client.Context.ToNodeId(nodeId));
             nodeId = new ExpandedNodeId(new byte[] { 12, 12, 6 }, 1);
             Assert.Equal(new NodeId(new byte[] { 12, 12, 6 }, 1), tester.Client.Context.ToNodeId(nodeId));
-            nodeId = new ExpandedNodeId("other-server", "opc.tcp://some-other-server.test", 1);
+            nodeId = new ExpandedNodeId("other-server", 0, "opc.tcp://some-other-server.test", 1);
             Assert.Null(tester.Client.Context.ToNodeId(nodeId));
         }
         [Fact]

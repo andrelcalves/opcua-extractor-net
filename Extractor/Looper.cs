@@ -16,7 +16,6 @@ along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA. */
 
 using Cognite.Extractor.Common;
-using Cognite.Extractor.Logging;
 using Cognite.OpcUa.Config;
 using Microsoft.Extensions.Logging;
 using Prometheus;
@@ -129,13 +128,13 @@ namespace Cognite.OpcUa
 
         private async Task CheckFailingPushers(CancellationToken token)
         {
-            if (!failingPushers.Any()) return;
+            if (failingPushers.Count == 0) return;
 
             var result = await Task.WhenAll(failingPushers.Select(pusher => pusher.TestConnection(config, token)));
             var recovered = result.Select((res, idx) => (result: res, pusher: failingPushers.ElementAt(idx)))
                 .Where(x => x.result == true).ToList();
 
-            if (recovered.Any())
+            if (recovered.Count != 0)
             {
                 log.LogInformation("Pushers {Names} recovered", string.Join(", ", recovered.Select(val => val.pusher.GetType())));
             }
@@ -173,19 +172,10 @@ namespace Cognite.OpcUa
 
             await CheckFailingPushers(token);
 
-            var results = await Task.WhenAll(
-            Task.Run(async () =>
-                await extractor.Streamer.PushDataPoints(passingPushers, failingPushers, token), token),
-            Task.Run(async () => await extractor.Streamer.PushEvents(passingPushers, failingPushers, token), token));
-
-            if (results.Any(res => res))
-            {
-                try
-                {
-                    Scheduler.TryTriggerTask(nameof(HistoryRestart));
-                }
-                catch { }
-            }
+            await Task.WhenAll(
+                Task.Run(async () => await extractor.Streamer.PushDataPoints(passingPushers, failingPushers, token), token),
+                Task.Run(async () => await extractor.Streamer.PushEvents(passingPushers, failingPushers, token), token)
+            );
 
             var failedPushers = passingPushers.Where(pusher =>
             pusher.DataFailing && extractor.Streamer.AllowData
@@ -245,27 +235,12 @@ namespace Cognite.OpcUa
             }
         }
 
-        private async Task HistoryRestart(CancellationToken token)
+        private void HistoryRestart(CancellationToken token)
         {
             if (token.IsCancellationRequested) return;
-            log.LogInformation("Restarting history...");
-            bool success = await extractor.TerminateHistory(30);
-            if (!success) throw new ExtractorFailureException("Failed to terminate history");
-            if (config.History.Enabled && config.History.Data)
-            {
-                foreach (var state in extractor.State.NodeStates.Where(state => state.FrontfillEnabled))
-                {
-                    state.RestartHistory();
-                }
-            }
-            if (config.Events.History && config.Events.Enabled)
-            {
-                foreach (var state in extractor.State.EmitterStates.Where(state => state.FrontfillEnabled))
-                {
-                    state.RestartHistory();
-                }
-            }
-            await extractor.RestartHistory();
+            log.LogInformation("Requesting restart of history...");
+
+            extractor.TriggerHistoryRestart();
         }
     }
 }

@@ -15,19 +15,23 @@ You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA. */
 
+using Cognite.Extensions.DataModels.QueryBuilder;
 using Cognite.Extractor.Common;
 using Cognite.OpcUa.Config;
 using Cognite.OpcUa.History;
 using Cognite.OpcUa.Nodes;
 using Cognite.OpcUa.Types;
 using Microsoft.Extensions.Logging;
+using MQTTnet.Internal;
 using Opc.Ua;
 using Opc.Ua.Client;
 using Prometheus;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
+using Nito.AsyncEx;
 using System.Threading.Tasks;
 
 namespace Cognite.OpcUa
@@ -47,8 +51,8 @@ namespace Cognite.OpcUa
         private const int maxEventCount = 100_000;
         private const int maxDpCount = 1_000_000;
 
-        private readonly object dataPointMutex = new object();
-        private readonly object eventMutex = new object();
+        private readonly AsyncMonitor dataPointMutex = new AsyncMonitor();
+        private readonly AsyncMonitor eventMutex = new AsyncMonitor();
 
         private readonly ILogger<Streamer> log;
 
@@ -68,14 +72,19 @@ namespace Cognite.OpcUa
             this.extractor = extractor;
             this.config = config;
         }
+
         /// <summary>
         /// Enqueue a datapoint, pushes if this exceeds the maximum.
         /// </summary>
         /// <param name="dp">Datapoint to enqueue.</param>
         public void Enqueue(UADataPoint dp)
         {
-            lock (dataPointMutex)
+            using (dataPointMutex.Enter())
             {
+                while (dataPointQueue.Count >= maxDpCount)
+                {
+                    dataPointMutex.Wait();
+                }
                 dataPointQueue.Enqueue(dp);
                 if (dataPointQueue.Count >= maxDpCount) extractor.Looper.Scheduler.TryTriggerTask("Pushers");
             }
@@ -87,11 +96,17 @@ namespace Cognite.OpcUa
         public void Enqueue(IEnumerable<UADataPoint> dps)
         {
             if (dps == null) return;
-            lock (dataPointMutex)
+            using (dataPointMutex.Enter())
             {
-                foreach (var dp in dps) dataPointQueue.Enqueue(dp);
-                if (dataPointQueue.Count >= maxDpCount) extractor.Looper.Scheduler.TryTriggerTask("Pushers");
-
+                foreach (var dp in dps)
+                {
+                    while (dataPointQueue.Count >= maxDpCount)
+                    {
+                        dataPointMutex.Wait();
+                    }
+                    dataPointQueue.Enqueue(dp);
+                    if (dataPointQueue.Count >= maxDpCount) extractor.Looper.Scheduler.TryTriggerTask("Pushers");
+                }
             }
         }
         /// <summary>
@@ -100,8 +115,12 @@ namespace Cognite.OpcUa
         /// <param name="evt">Event to enqueue.</param>
         public void Enqueue(UAEvent evt)
         {
-            lock (eventMutex)
+            using (eventMutex.Enter())
             {
+                while (eventQueue.Count >= maxEventCount)
+                {
+                    eventMutex.Wait();
+                }
                 eventQueue.Enqueue(evt);
                 if (eventQueue.Count >= maxEventCount) extractor.Looper.Scheduler.TryTriggerTask("Pushers");
             }
@@ -113,10 +132,92 @@ namespace Cognite.OpcUa
         public void Enqueue(IEnumerable<UAEvent> events)
         {
             if (events == null) return;
-            lock (eventMutex)
+            using (eventMutex.Enter())
             {
-                foreach (var evt in events) eventQueue.Enqueue(evt);
+                foreach (var evt in events)
+                {
+                    while (eventQueue.Count >= maxEventCount)
+                    {
+                        eventMutex.Wait();
+                    }
+                    eventQueue.Enqueue(evt);
+                    if (eventQueue.Count >= maxEventCount) extractor.Looper.Scheduler.TryTriggerTask("Pushers");
+                }
+            }
+        }
+
+
+        /// <summary>
+        /// Enqueue a datapoint, pushes if this exceeds the maximum.
+        /// </summary>
+        /// <param name="dp">Datapoint to enqueue.</param>
+        public async Task EnqueueAsync(UADataPoint dp)
+        {
+            using (await dataPointMutex.EnterAsync())
+            {
+                while (dataPointQueue.Count >= maxDpCount)
+                {
+                    await dataPointMutex.WaitAsync();
+                }
+                dataPointQueue.Enqueue(dp);
+                if (dataPointQueue.Count >= maxDpCount) extractor.Looper.Scheduler.TryTriggerTask("Pushers");
+            }
+        }
+        /// <summary>
+        /// Enqueue a list of datapoints, pushes if this exceeds the maximum.
+        /// </summary>
+        /// <param name="dps">Datapoints to enqueue.</param>
+        public async Task EnqueueAsync(IEnumerable<UADataPoint> dps)
+        {
+            if (dps == null) return;
+            using (await dataPointMutex.EnterAsync())
+            {
+                foreach (var dp in dps)
+                {
+                    while (dataPointQueue.Count >= maxDpCount)
+                    {
+                        await dataPointMutex.WaitAsync();
+                        log.LogDebug("Wait for dp queue");
+                    }
+                    dataPointQueue.Enqueue(dp);
+                    if (dataPointQueue.Count >= maxDpCount) extractor.Looper.Scheduler.TryTriggerTask("Pushers");
+                }
+            }
+        }
+        /// <summary>
+        /// Enqueues an event, pushes if this exceeds the maximum.
+        /// </summary>
+        /// <param name="evt">Event to enqueue.</param>
+        public async Task EnqueueAsync(UAEvent evt)
+        {
+            using (await eventMutex.EnterAsync())
+            {
+                while (eventQueue.Count >= maxEventCount)
+                {
+                    await eventMutex.WaitAsync();
+                }
+                eventQueue.Enqueue(evt);
                 if (eventQueue.Count >= maxEventCount) extractor.Looper.Scheduler.TryTriggerTask("Pushers");
+            }
+        }
+        /// <summary>
+        /// Enqueues a list of events, pushes if this exceeds the maximum.
+        /// </summary>
+        /// <param name="events">Events to enqueue.</param>
+        public async Task EnqueueAsync(IEnumerable<UAEvent> events)
+        {
+            if (events == null) return;
+            using (await eventMutex.EnterAsync())
+            {
+                foreach (var evt in events)
+                {
+                    while (eventQueue.Count >= maxEventCount)
+                    {
+                        await eventMutex.WaitAsync();
+                    }
+                    eventQueue.Enqueue(evt);
+                    if (eventQueue.Count >= maxEventCount) extractor.Looper.Scheduler.TryTriggerTask("Pushers");
+                }
             }
         }
         /// <summary>
@@ -125,17 +226,15 @@ namespace Cognite.OpcUa
         /// <param name="passingPushers">Succeeding pushers, data will be pushed to these.</param>
         /// <param name="failingPushers">Failing pushers, data will not be pushed to these.</param>
         /// <returns>True if history should be restarted after this</returns>
-        public async Task<bool> PushDataPoints(IEnumerable<IPusher> passingPushers,
+        public async Task PushDataPoints(IEnumerable<IPusher> passingPushers,
             IEnumerable<IPusher> failingPushers, CancellationToken token)
         {
-            if (!AllowData) return false;
-
-            bool restartHistory = false;
+            if (!AllowData) return;
 
             var dataPointList = new List<UADataPoint>();
             var pointRanges = new Dictionary<string, TimeRange>();
 
-            lock (dataPointMutex)
+            using (await dataPointMutex.EnterAsync())
             {
                 while (dataPointQueue.TryDequeue(out UADataPoint dp))
                 {
@@ -147,6 +246,7 @@ namespace Cognite.OpcUa
                     }
                     pointRanges[dp.Id] = range.Extend(dp.Timestamp, dp.Timestamp);
                 }
+                dataPointMutex.PulseAll();
             }
 
 
@@ -174,23 +274,17 @@ namespace Cognite.OpcUa
                     await extractor.FailureBuffer.WriteDatapoints(dataPointList, pointRanges, token);
                 }
 
-                return false;
+                return;
             }
             var reconnectedPushers = passingPushers.Where(pusher => pusher.DataFailing).ToList();
-            if (reconnectedPushers.Any())
+            if (reconnectedPushers.Count != 0)
             {
                 log.LogInformation("{Count} failing pushers were able to push data, reconnecting", reconnectedPushers.Count);
 
                 if (config.History.Enabled && extractor.State.NodeStates.Any(state => state.FrontfillEnabled))
                 {
                     log.LogInformation("Restarting history for {Count} states", extractor.State.NodeStates.Count(state => state.FrontfillEnabled));
-                    bool success = await extractor.TerminateHistory(30);
-                    if (!success) throw new ExtractorFailureException("Failed to terminate history reader");
-                    foreach (var state in extractor.State.NodeStates.Where(state => state.FrontfillEnabled))
-                    {
-                        state.RestartHistory();
-                    }
-                    restartHistory = true;
+                    await extractor.RestartHistoryWaitForStop();
                 }
 
                 foreach (var pusher in reconnectedPushers)
@@ -206,9 +300,8 @@ namespace Cognite.OpcUa
             foreach ((string id, var range) in pointRanges)
             {
                 var state = extractor.State.GetNodeState(id);
-                if (extractor.AllowUpdateState) state?.UpdateDestinationRange(range.First, range.Last);
+                if (state != null && (extractor.AllowUpdateState || !state.FrontfillEnabled && !state.BackfillEnabled)) state.UpdateDestinationRange(range.First, range.Last);
             }
-            return restartHistory;
         }
         /// <summary>
         /// Push events to destinations
@@ -216,17 +309,15 @@ namespace Cognite.OpcUa
         /// <param name="passingPushers">Succeeding pushers, events will be pushed to these.</param>
         /// <param name="failingPushers">Failing pushers, events will not be pushed to these.</param>
         /// <returns>True if history should be restarted after this</returns>
-        public async Task<bool> PushEvents(IEnumerable<IPusher> passingPushers,
+        public async Task PushEvents(IEnumerable<IPusher> passingPushers,
             IEnumerable<IPusher> failingPushers, CancellationToken token)
         {
-            if (!AllowEvents) return false;
+            if (!AllowEvents) return;
 
             var eventList = new List<UAEvent>();
             var eventRanges = new Dictionary<NodeId, TimeRange>();
 
-            bool restartHistory = false;
-
-            lock (eventMutex)
+            using (await eventMutex.EnterAsync())
             {
                 while (eventQueue.TryDequeue(out UAEvent evt))
                 {
@@ -239,6 +330,7 @@ namespace Cognite.OpcUa
 
                     eventRanges[evt.EmittingNode] = range.Extend(evt.Time, evt.Time);
                 }
+                eventMutex.PulseAll();
             }
 
             var results = await Task.WhenAll(passingPushers.Select(pusher => pusher.PushEvents(eventList, token)));
@@ -266,23 +358,17 @@ namespace Cognite.OpcUa
                     await extractor.FailureBuffer.WriteEvents(eventList, token);
                 }
 
-                return false;
+                return;
             }
             var reconnectedPushers = passingPushers.Where(pusher => pusher.EventsFailing).ToList();
-            if (reconnectedPushers.Any())
+            if (reconnectedPushers.Count != 0)
             {
                 log.LogInformation("{Count} failing pushers were able to push events, reconnecting", reconnectedPushers.Count);
 
                 if (config.Events.History && extractor.State.EmitterStates.Any(state => state.FrontfillEnabled))
                 {
                     log.LogInformation("Restarting event history for {Count} states", extractor.State.EmitterStates.Count(state => state.FrontfillEnabled));
-                    bool success = await extractor.TerminateHistory(30);
-                    if (!success) throw new ExtractorFailureException("Failed to terminate history reader");
-                    foreach (var state in extractor.State.EmitterStates.Where(state => state.FrontfillEnabled))
-                    {
-                        state.RestartHistory();
-                    }
-                    restartHistory = true;
+                    await extractor.RestartHistoryWaitForStop();
                 }
 
                 foreach (var pusher in reconnectedPushers)
@@ -297,11 +383,8 @@ namespace Cognite.OpcUa
             foreach (var (id, range) in eventRanges)
             {
                 var state = extractor.State.GetEmitterState(id);
-                if (extractor.AllowUpdateState) state?.UpdateDestinationRange(range.First, range.Last);
+                if (state != null && (extractor.AllowUpdateState || !state.FrontfillEnabled && !state.BackfillEnabled)) state?.UpdateDestinationRange(range.First, range.Last);
             }
-
-
-            return restartHistory;
         }
         /// <summary>
         /// Handles notifications on subscribed items, pushes all new datapoints to the queue.
@@ -340,7 +423,20 @@ namespace Cognite.OpcUa
                     log.LogDebug("Bad streaming datapoint: {BadDatapointExternalId} {SourceTimestamp}. Value: {Value}, Status: {Status}",
                         node.Id, datapoint.SourceTimestamp, datapoint.Value, ExtractorUtils.GetStatusCodeName((uint)datapoint.StatusCode));
                 }
-                return;
+
+                switch (config.Extraction.StatusCodes.StatusCodesToIngest)
+                {
+                    case StatusCodeMode.All:
+                        break;
+                    case StatusCodeMode.Uncertain:
+                        if (!StatusCode.IsUncertain(datapoint.StatusCode))
+                        {
+                            return;
+                        }
+                        break;
+                    case StatusCodeMode.GoodOnly:
+                        return;
+                }
             }
 
             timeToExtractorDps.Observe((DateTime.UtcNow - datapoint.SourceTimestamp).TotalSeconds);
@@ -355,7 +451,10 @@ namespace Cognite.OpcUa
             }
 
             var buffDps = ToDataPoint(datapoint, node);
-            node.UpdateFromStream(buffDps);
+            if (StatusCode.IsGood(datapoint.StatusCode))
+            {
+                node.UpdateFromStream(buffDps);
+            }
 
             if ((extractor.StateStorage == null || config.StateStorage.IntervalValue.Value == Timeout.InfiniteTimeSpan)
                  && (node.IsFrontfilling && datapoint.SourceTimestamp > node.SourceExtractedRange.Last
@@ -429,7 +528,7 @@ namespace Cognite.OpcUa
                 for (int i = 0; i < dim; i++)
                 {
                     var id = variable.IsArray ? GetArrayUniqueId(uniqueId, i) : uniqueId;
-                    ret.Add(variable.DataType.ToDataPoint(extractor, values.GetValue(i), value.SourceTimestamp, id));
+                    ret.Add(variable.DataType.ToDataPoint(extractor, values.GetValue(i), value.SourceTimestamp, id, value.StatusCode));
                 }
                 return ret;
             }
@@ -438,7 +537,7 @@ namespace Cognite.OpcUa
                 uniqueId = GetArrayUniqueId(uniqueId, 0);
             }
 
-            var sdp = variable.DataType.ToDataPoint(extractor, value.WrappedValue, value.SourceTimestamp, uniqueId);
+            var sdp = variable.DataType.ToDataPoint(extractor, value.WrappedValue, value.SourceTimestamp, uniqueId, value.StatusCode);
             return new[] { sdp };
         }
 

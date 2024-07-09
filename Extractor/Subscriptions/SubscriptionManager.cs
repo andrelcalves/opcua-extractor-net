@@ -1,5 +1,6 @@
 ﻿using Cognite.Extractor.Common;
 using Cognite.OpcUa.Config;
+using Cognite.OpcUa.History;
 using Microsoft.Extensions.Logging;
 using Opc.Ua.Client;
 using System;
@@ -14,6 +15,8 @@ namespace Cognite.OpcUa.Subscriptions
     {
         public abstract string TaskName { get; }
 
+        public abstract SubscriptionName SubscriptionToCreate { get; }
+
         public abstract Task<bool> ShouldRun(ILogger logger, SessionManager sessionManager, CancellationToken token);
 
         public abstract Task Run(ILogger logger, SessionManager sessionManager, FullConfig config, SubscriptionManager subscriptionManager, CancellationToken token);
@@ -23,7 +26,7 @@ namespace Cognite.OpcUa.Subscriptions
 
     public class SubscriptionManager
     {
-        private readonly SessionManager sessionManager;
+        private readonly UAClient client;
         private readonly FullConfig config;
 
         private readonly ILogger logger;
@@ -34,9 +37,9 @@ namespace Cognite.OpcUa.Subscriptions
 
         public SubscriptionStateCache Cache { get; } = new();
 
-        public SubscriptionManager(SessionManager sessionManager, FullConfig config, ILogger logger)
+        public SubscriptionManager(UAClient client, FullConfig config, ILogger logger)
         {
-            this.sessionManager = sessionManager;
+            this.client = client;
             this.config = config;
             this.logger = logger;
         }
@@ -45,16 +48,35 @@ namespace Cognite.OpcUa.Subscriptions
         {
             if (sender is not Subscription sub || !sub.PublishingStopped) return;
 
-            EnqueueTaskEnsureUnique(new RecreateSubscriptionTask(sub));
+            if (!config.Subscriptions.RecreateStoppedSubscriptions)
+            {
+                logger.LogWarning("Subscription {Name} is stopped. Recreating stopped subscriptions is disabled.",
+                    sub.DisplayName);
+                return;
+            }
+
+            logger.LogDebug("Subscription status changed for subscription {Sub}", sub.DisplayName);
+
+            var subName = Enum.Parse<SubscriptionName>(sub.DisplayName.Split(' ').First());
+
+            if (EnqueueTaskEnsureUnique(new RecreateSubscriptionTask(sub, subName, client.Callbacks)))
+            {
+                logger.LogWarning("Subscription {Name} is not responding, adding task to recreate", subName);
+            }
+            else
+            {
+                logger.LogDebug("Subscription {Name} already queued for recreation, not adding task", subName);
+            }
         }
 
-        public void EnqueueTaskEnsureUnique(PendingSubscriptionTask task)
+        public bool EnqueueTaskEnsureUnique(PendingSubscriptionTask task)
         {
             lock (taskQueueLock)
             {
-                if (taskQueue.Any(q => q.TaskName == task.TaskName)) return;
+                if (taskQueue.Any(q => q.TaskName == task.TaskName)) return false;
                 taskQueue.Enqueue(task);
                 taskQueueEvent.Set();
+                return true;
             }
         }
 
@@ -90,9 +112,10 @@ namespace Cognite.OpcUa.Subscriptions
         {
             try
             {
-                if (!await task.ShouldRun(logger, sessionManager, token)) return;
+                if (!await task.ShouldRun(logger, client.SessionManager, token)) return;
 
-                await task.Run(logger, sessionManager, config, this, token);
+                await task.Run(logger, client.SessionManager, config, this, token);
+                client.Callbacks.OnCreatedSubscription(task.SubscriptionToCreate);
             }
             finally
             {

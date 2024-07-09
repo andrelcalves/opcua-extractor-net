@@ -119,7 +119,6 @@ namespace Cognite.OpcUa.Pushers
         {
             if (points == null) return null;
             Dictionary<string, List<UADataPoint>> dataPointList = points
-                .Where(dp => dp.Timestamp > DateTime.UnixEpoch)
                 .GroupBy(dp => dp.Id)
                 .Where(group => !cdfWriter.MismatchedTimeseries.Contains(group.Key)
                     && !missingTimeseries.Contains(group.Key))
@@ -131,8 +130,8 @@ namespace Cognite.OpcUa.Pushers
 
             var inserts = dataPointList.ToDictionary(kvp =>
                 Identity.Create(kvp.Key),
-                kvp => kvp.Value.Select(
-                    dp => dp.IsString ? new Datapoint(dp.Timestamp, dp.StringValue) : new Datapoint(dp.Timestamp, dp.DoubleValue.Value))
+                kvp => kvp.Value.SelectNonNull(
+                    dp => dp.ToCDFDataPoint(fullConfig.Extraction.StatusCodes.IngestStatusCodes, log))
                 );
 
             if (fullConfig.DryRun)
@@ -143,7 +142,9 @@ namespace Cognite.OpcUa.Pushers
 
             try
             {
-                var result = await destination.InsertDataPointsAsync(inserts, SanitationMode.Clean, RetryMode.OnError, token);
+                CogniteResult<DataPointInsertError> result;
+                result = await destination.InsertDataPointsAsync(inserts, SanitationMode.Clean, RetryMode.OnError, token);
+
                 int realCount = count;
 
                 log.LogResult(result, RequestType.CreateDatapoints, false, LogLevel.Debug);
@@ -194,7 +195,7 @@ namespace Cognite.OpcUa.Pushers
             }
             catch (Exception e)
             {
-                log.LogError("Failed to push {Count} points to CDF: {Message}", count, e.Message);
+                log.LogError(e, "Failed to push {Count} points to CDF: {Message}", count, e.Message);
                 dataPointPushFailures.Inc();
                 // Return false indicating unexpected failure if we want to buffer.
                 return false;
@@ -547,7 +548,7 @@ namespace Cognite.OpcUa.Pushers
             if (fullConfig.DryRun) return true;
             try
             {
-                await cdfWriter.ExecuteDeletes(deletes, token);
+                await cdfWriter.ExecuteDeletes(deletes, Extractor, token);
             }
             catch (Exception ex)
             {

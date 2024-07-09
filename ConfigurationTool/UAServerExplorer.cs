@@ -17,6 +17,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA. 
 
 using Cognite.Extractor.Common;
 using Cognite.OpcUa.Nodes;
+using Cognite.OpcUa.Subscriptions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Opc.Ua;
@@ -96,7 +97,7 @@ namespace Cognite.OpcUa.Config
             if (nodesRead) return;
             nodeList.Clear();
             log.LogInformation("Mapping out node hierarchy");
-            var roots = Config.Extraction.GetRootNodes(Context, log);
+            var roots = Config.Extraction.GetRootNodes(Context);
             try
             {
                 await Browser.BrowseNodeHierarchy(roots, ToolUtil.GetSimpleListWriterCallback(nodeList, this, TypeManager, log), token,
@@ -267,6 +268,14 @@ namespace Cognite.OpcUa.Config
         public Task OnServicelevelBelowThreshold(UAClient source)
         {
             return Task.CompletedTask;
+        }
+
+        public void OnSubscriptionFailure(SubscriptionName subscription)
+        {
+        }
+
+        public void OnCreatedSubscription(SubscriptionName subscription)
+        {
         }
 
         public FullConfig FinalConfig => baseConfig;

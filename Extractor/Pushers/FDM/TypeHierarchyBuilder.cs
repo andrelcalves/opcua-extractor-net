@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Cognite.Extensions.DataModels;
@@ -59,7 +60,7 @@ namespace Cognite.OpcUa.Pushers.FDM
             Types.Add(type.Node.Id, type);
 
             // Only create a container if the node has properties
-            bool shouldCreateContainer = type.Properties.Values.Any();
+            bool shouldCreateContainer = type.Properties.Values.Count != 0;
 
             ViewCreate view;
             if (shouldCreateContainer)
@@ -106,15 +107,16 @@ namespace Cognite.OpcUa.Pushers.FDM
             {
                 if (rf.ModellingRule != ModellingRule.ExposesItsArray)
                 {
+                    var idf = GetViewIdentifier(rf.ExternalId, type.ExternalId, rf, config);
                     view.Properties.Add(rf.ExternalId, new ConnectionDefinition
                     {
                         Description = rf.BrowseName.Name,
                         Name = rf.BrowseName.Name,
                         Direction = ConnectionDirection.outwards,
-                        Source = GetViewIdentifier(rf.ExternalId, type.ExternalId, rf, config),
+                        Source = idf,
                         Type = new DirectRelationIdentifier(modelInfo.InstanceSpace, context.NodeIdToString(rf.Reference.Type.Id))
                     });
-                    ViewIsReferenced[rf.Type!.ExternalId] = true;
+                    ViewIsReferenced[idf.ExternalId] = true;
                 }
             }
             Views.Add(view.Name!, view);
@@ -129,7 +131,23 @@ namespace Cognite.OpcUa.Pushers.FDM
 
             if (rf.NodeClass == NodeClass.Object || rf.NodeClass == NodeClass.Variable)
             {
-                return modelInfo.ViewIdentifier(rf.Type!.ExternalId);
+                string typeExternalId;
+                if (rf.Type != null)
+                {
+                    typeExternalId = rf.Type.ExternalId;
+                }
+                else
+                {
+                    if (rf.NodeClass == NodeClass.Object)
+                    {
+                        typeExternalId = "BaseObjectType";
+                    }
+                    else
+                    {
+                        typeExternalId = "BaseVariableType";
+                    }
+                }
+                return modelInfo.ViewIdentifier(typeExternalId);
             }
             else if (rf.NodeClass == NodeClass.ObjectType)
             {
@@ -203,8 +221,6 @@ namespace Cognite.OpcUa.Pushers.FDM
                 || dt.Id == DataTypeIds.QualifiedName
                 || dt.Id == DataTypeIds.String) return BasePropertyType.Text(isArray);
             if (dt.Id == DataTypeIds.DateTime
-                || dt.Id == DataTypeIds.Date
-                || dt.Id == DataTypeIds.Time
                 || dt.Id == DataTypeIds.UtcTime) return BasePropertyType.Create(PropertyTypeVariant.timestamp, isArray);
 
             if (dt.Id == DataTypeIds.NodeId || dt.Id == DataTypeIds.ExpandedNodeId)

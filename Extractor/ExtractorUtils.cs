@@ -138,7 +138,7 @@ namespace Cognite.OpcUa
                 {
                     LogException(log, exc, message, silentMessage);
                 }
-                if (!flat.InnerExceptions.Any())
+                if (flat.InnerExceptions.Count == 0)
                 {
                     log.LogError(e, "{Message} - {ErrMessage}", message, e.Message);
                 }
@@ -195,7 +195,7 @@ namespace Cognite.OpcUa
         {
             var exceptions = new List<Exception>();
             var flat = ex.Flatten();
-            if (flat.InnerExceptions != null && flat.InnerExceptions.Any())
+            if (flat.InnerExceptions != null && flat.InnerExceptions.Count != 0)
             {
                 foreach (var e in flat.InnerExceptions)
                 {
@@ -523,8 +523,13 @@ namespace Cognite.OpcUa
         public uint StatusCode { get; }
         public ServiceResultException? InnerServiceException { get; }
 
+        private static string GetSymbolicId(uint sc)
+        {
+            return Opc.Ua.StatusCode.LookupSymbolicId(sc);
+        }
+
         public SilentServiceException(string msg, ServiceResultException ex, ExtractorUtils.SourceOp op)
-            : base($"{msg}: code {ex?.StatusCode ?? StatusCodes.BadUnexpectedError}, operation {op}", ex)
+            : base($"{msg}: code {GetSymbolicId(ex?.StatusCode ?? StatusCodes.BadUnexpectedError)}, operation {op}", ex)
         {
             Operation = op;
             StatusCode = ex?.StatusCode ?? StatusCodes.BadUnexpectedError;

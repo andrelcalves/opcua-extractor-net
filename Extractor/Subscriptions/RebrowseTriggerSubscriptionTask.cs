@@ -2,9 +2,7 @@
 using Microsoft.Extensions.Logging;
 using Opc.Ua;
 using Opc.Ua.Client;
-using System;
 using System.Collections.Generic;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -13,15 +11,18 @@ namespace Cognite.OpcUa.Subscriptions
     internal class RebrowseTriggerSubscriptionTask : BaseCreateSubscriptionTask<(NodeId, string)>
     {
         private MonitoredItemNotificationEventHandler handler;
-        public RebrowseTriggerSubscriptionTask(MonitoredItemNotificationEventHandler handler,
-            Dictionary<NodeId, (NodeId, string)> ids) : base(SubscriptionName.RebrowseTriggers, ids)
+
+        public RebrowseTriggerSubscriptionTask(
+            MonitoredItemNotificationEventHandler handler,
+            Dictionary<NodeId, (NodeId, string)> ids,
+            IClientCallbacks callbacks) : base(SubscriptionName.RebrowseTriggers, ids, callbacks)
         {
             this.handler = handler;
         }
 
         public override string TaskName => "Create rebrowse trigger subscription";
 
-        public override Task<bool> ShouldRun(ILogger logger, SessionManager sessionManager, CancellationToken token)
+        public override Task<bool> ShouldRun(ILogger logger, SessionManager _, CancellationToken _1)
         {
             return Task.FromResult(true);
         }

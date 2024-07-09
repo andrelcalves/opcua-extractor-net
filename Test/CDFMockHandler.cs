@@ -34,6 +34,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Xunit;
 
 #pragma warning disable IDE1006 // Naming Styles
 
@@ -59,7 +60,6 @@ namespace Test
         public Dictionary<string, JsonObject> Views { get; } = new();
         public Dictionary<string, JsonObject> Containers { get; } = new();
         public Dictionary<string, JsonObject> Instances { get; } = new();
-        public List<BrowseReport> Callbacks { get; } = new List<BrowseReport>();
 
         private long assetIdCounter = 1;
         private long timeseriesIdCounter = 1;
@@ -119,15 +119,6 @@ namespace Test
             if (BlockAllConnections)
             {
                 return GetFailedRequest(HttpStatusCode.InternalServerError);
-            }
-
-            if (req.RequestUri.AbsolutePath == $"/api/playground/projects/{project}/functions/1234/call")
-            {
-                var funcContent = await req.Content.ReadAsStringAsync(cancellationToken);
-                var res = HandleCallFunction(funcContent);
-                res.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
-                res.Headers.Add("x-request-id", (requestIdCounter++).ToString(CultureInfo.InvariantCulture));
-                return res;
             }
 
             string reqPath = req.RequestUri.AbsolutePath.Replace($"/api/v1/projects/{project}", "", StringComparison.InvariantCulture);
@@ -246,10 +237,10 @@ namespace Test
                             res = HandleCreateInstances(content);
                             break;
                         case "/models/instances/list":
-                            res = new HttpResponseMessage(HttpStatusCode.OK)
-                            {
-                                Content = new StringContent("{\"items\":[]}")
-                            };
+                            res = HandleFilterInstances(content);
+                            break;
+                        case "/models/instances/delete":
+                            res = HandleDeleteInstances(content);
                             break;
                         default:
                             log.LogWarning("Unknown path: {DummyFactoryUnknownPath}", reqPath);
@@ -302,9 +293,9 @@ namespace Test
                     Content = new StringContent(res)
                 };
             }
-            if (missing.Any() && !ids.ignoreUnknownIds)
+            if (missing.Count != 0 && !ids.ignoreUnknownIds)
             {
-                IList<string> finalMissing;
+                List<string> finalMissing;
                 if (mode == MockMode.All)
                 {
                     foreach (string id in missing)
@@ -426,9 +417,9 @@ namespace Test
                     missing.Add(id.externalId);
                 }
             }
-            if (missing.Any() && !ids.ignoreUnknownIds)
+            if (missing.Count != 0 && !ids.ignoreUnknownIds)
             {
-                IList<string> finalMissing;
+                List<string> finalMissing;
                 if (mode == MockMode.All)
                 {
                     foreach (string id in missing)
@@ -485,6 +476,7 @@ namespace Test
                 {
                     if (Datapoints.TryGetValue(ts.externalId, out var dps))
                     {
+#pragma warning disable CA1860 // Avoid using 'Enumerable.Any()' extension method
                         if (ts.isString && (dps.StringDatapoints?.Any() ?? false))
                         {
                             ts.datapoints = new[] { new DataPoint
@@ -499,6 +491,7 @@ namespace Test
                                 timestamp = dps.NumericDatapoints.Max(dp => dp.Timestamp)
                             } };
                         }
+#pragma warning restore CA1860 // Avoid using 'Enumerable.Any()' extension method
                     }
                 }
                 string result = JsonConvert.SerializeObject(new ReadWrapper<TimeseriesDummy>
@@ -594,19 +587,24 @@ namespace Test
 
             foreach (var item in req.Items)
             {
-                if (!Datapoints.ContainsKey(item.ExternalId))
+                if (!Datapoints.TryGetValue(item.ExternalId, out var value))
                 {
-                    Datapoints[item.ExternalId] = (new List<NumericDatapoint>(), new List<StringDatapoint>());
+                    value = (new List<NumericDatapoint>(), new List<StringDatapoint>());
+                    Datapoints[item.ExternalId] = value;
                 }
+                log.LogInformation("Dps to {Id}: {Num} {Str}",
+                    item.ExternalId,
+                    item.NumericDatapoints?.Datapoints?.Count,
+                    item.StringDatapoints?.Datapoints?.Count);
                 if (item.DatapointTypeCase == DataPointInsertionItem.DatapointTypeOneofCase.NumericDatapoints)
                 {
                     log.LogInformation("{Count} numeric datapoints to {Id}", item.NumericDatapoints.Datapoints.Count, item.ExternalId);
-                    Datapoints[item.ExternalId].NumericDatapoints.AddRange(item.NumericDatapoints.Datapoints);
+                    value.NumericDatapoints.AddRange(item.NumericDatapoints.Datapoints);
                 }
                 else
                 {
                     log.LogInformation("{Count} string datapoints to {Id}", item.StringDatapoints.Datapoints.Count, item.ExternalId);
-                    Datapoints[item.ExternalId].StringDatapoints.AddRange(item.StringDatapoints.Datapoints);
+                    value.StringDatapoints.AddRange(item.StringDatapoints.Datapoints);
                 }
             }
 
@@ -642,14 +640,14 @@ namespace Test
                     duplicated.Add(new CdfIdentity { externalId = ev.externalId });
                     continue;
                 }
-                if (duplicated.Any()) continue;
+                if (duplicated.Count != 0) continue;
                 ev.id = eventIdCounter++;
                 ev.createdTime = new DateTimeOffset(DateTime.UtcNow).ToUnixTimeMilliseconds();
                 ev.lastUpdatedTime = new DateTimeOffset(DateTime.UtcNow).ToUnixTimeMilliseconds();
                 created.Add((ev.externalId, ev));
             }
 
-            if (duplicated.Any())
+            if (duplicated.Count != 0)
             {
                 string errResult = JsonConvert.SerializeObject(new ErrorWrapper
                 {
@@ -699,6 +697,7 @@ namespace Test
                     if (Timeseries[id.externalId].isString)
                     {
                         item.StringDatapoints = new StringDatapoints();
+#pragma warning disable CA1860 // Avoid using 'Enumerable.Any()' extension method
                         if (dps.StringDatapoints?.Any() ?? false)
                         {
                             item.StringDatapoints.Datapoints.Add(dps.StringDatapoints.Aggregate((curMin, x) =>
@@ -713,7 +712,7 @@ namespace Test
                             item.NumericDatapoints.Datapoints.Add(Datapoints[id.externalId].NumericDatapoints.Aggregate((curMin, x) =>
                                 curMin == null || x.Timestamp < curMin.Timestamp ? x : curMin));
                         }
-
+#pragma warning restore CA1860 // Avoid using 'Enumerable.Any()' extension method
                     }
                 }
 
@@ -977,27 +976,6 @@ namespace Test
             };
         }
 
-
-        private HttpResponseMessage HandleCallFunction(string content)
-        {
-            var options = new JsonSerializerSettings
-            {
-                ContractResolver = new DefaultContractResolver
-                {
-                    NamingStrategy = new CamelCaseNamingStrategy()
-                }
-            };
-            var data = JsonConvert.DeserializeObject<FunctionCallWrapper<BrowseReport>>(content, options);
-
-            Callbacks.Add(data.Data);
-
-            return new HttpResponseMessage
-            {
-                StatusCode = HttpStatusCode.OK,
-                Content = new StringContent("{}")
-            };
-        }
-
         public AssetDummy MockAsset(string externalId)
         {
             var asset = new AssetDummy
@@ -1042,12 +1020,12 @@ namespace Test
                     duplicated.Add(new CdfIdentity { externalId = rel.externalId });
                     continue;
                 }
-                if (duplicated.Any()) continue;
+                if (duplicated.Count != 0) continue;
                 rel.createdTime = new DateTimeOffset(DateTime.UtcNow).ToUnixTimeMilliseconds();
                 rel.lastUpdatedTime = new DateTimeOffset(DateTime.UtcNow).ToUnixTimeMilliseconds();
                 created.Add((rel.externalId, rel));
             }
-            if (duplicated.Any())
+            if (duplicated.Count != 0)
             {
                 string errResult = JsonConvert.SerializeObject(new ErrorWrapper
                 {
@@ -1163,6 +1141,64 @@ namespace Test
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(content)
+            };
+        }
+
+        private HttpResponseMessage HandleFilterInstances(string content)
+        {
+            var results = new List<BaseInstance<JsonObject>>();
+
+            var req = System.Text.Json.JsonSerializer.Deserialize<InstancesFilter>(content, Oryx.Cognite.Common.jsonOptions);
+            if (req.InstanceType == InstanceType.edge && req.Filter is OrFilter orF && orF.Or.First() is InFilter)
+            {
+                var filters = orF.Or.OfType<InFilter>().ToList();
+                Assert.Equal(2, filters.Count);
+
+                var startNodes = filters
+                    .First(f => f.Property.ElementAt(1) == "startNode")
+                    .Values
+                    .Select(v => (v as RawPropertyValue<JsonElement>).Value
+                        .Deserialize<DirectRelationIdentifier>(Oryx.Cognite.Common.jsonOptions).ExternalId)
+                    .ToHashSet();
+                var endNodes = filters
+                    .First(f => f.Property.ElementAt(1) == "endNode")
+                    .Values
+                    .Select(v => (v as RawPropertyValue<JsonElement>).Value
+                        .Deserialize<DirectRelationIdentifier>(Oryx.Cognite.Common.jsonOptions).ExternalId)
+                    .ToHashSet();
+
+                foreach (var inst in Instances.Values)
+                {
+                    if (inst["instanceType"].GetValue<string>() == "edge"
+                        && (startNodes.Contains(inst["startNode"]["externalId"].GetValue<string>())
+                            || endNodes.Contains(inst["endNode"]["externalId"].GetValue<string>())))
+                    {
+                        results.Add(inst.Deserialize<Edge<JsonObject>>(Oryx.Cognite.Common.jsonOptions));
+                    }
+                }
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(System.Text.Json.JsonSerializer.Serialize(new ItemsWithCursor<BaseInstance<JsonObject>>
+                {
+                    Items = results,
+                    NextCursor = null
+                }, Oryx.Cognite.Common.jsonOptions))
+            };
+        }
+
+        private HttpResponseMessage HandleDeleteInstances(string content)
+        {
+            var req = System.Text.Json.JsonSerializer.Deserialize<ItemsWithoutCursor<InstanceIdentifier>>(content, Oryx.Cognite.Common.jsonOptions);
+            foreach (var id in req.Items)
+            {
+                Instances.Remove(id.ExternalId);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{}")
             };
         }
     }

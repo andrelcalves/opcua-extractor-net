@@ -26,17 +26,6 @@ using System.Linq;
 
 namespace Server
 {
-    public class ServerIssueConfig
-    {
-        public int MaxBrowseResults { get; set; }
-        public int MaxBrowseNodes { get; set; }
-        public int MaxAttributes { get; set; }
-        public int MaxSubscriptions { get; set; }
-        public int MaxHistoryNodes { get; set; }
-        public int RemainingBrowseCount { get; set; }
-        public int BrowseFailDenom { get; set; }
-        public Dictionary<NodeId, StatusCode> HistoryReadStatusOverride { get; } = new();
-    }
     /// <summary>
     /// The master node manager is called from the server with most "regular" service calls.
     /// It can be extended to override some behavior. Here the reason for overriding is to mock
@@ -46,15 +35,19 @@ namespace Server
     {
         private readonly ServerIssueConfig issues;
 
-        private readonly Random rand = new Random();
+        private readonly TestServer server;
+
+        private IServerRequestCallbacks callbacks => server.Callbacks;
 
         public DebugMasterNodeManager(
             IServerInternal server,
             ApplicationConfiguration config,
             string dynamicNamespaceUri,
             ServerIssueConfig issueConfig,
+            TestServer testServer,
             params INodeManager[] nodeManagers) : base(server, config, dynamicNamespaceUri, nodeManagers)
         {
+            this.server = testServer;
             issues = issueConfig;
         }
         public override void Read(
@@ -65,13 +58,10 @@ namespace Server
             out DataValueCollection values,
             out DiagnosticInfoCollection diagnosticInfos)
         {
-            if (nodesToRead == null) throw new ArgumentNullException(nameof(nodesToRead));
-            if (issues.MaxAttributes > 0 && nodesToRead.Count > issues.MaxAttributes)
-            {
-                values = new DataValueCollection { new DataValue { StatusCode = StatusCodes.BadTooManyOperations } };
-                diagnosticInfos = new DiagnosticInfoCollection();
-                return;
-            }
+            ArgumentNullException.ThrowIfNull(nodesToRead);
+
+            callbacks.OnRead(context, nodesToRead);
+
             base.Read(context, maxAge, timestampsToReturn, nodesToRead, out values, out diagnosticInfos);
         }
 
@@ -85,13 +75,10 @@ namespace Server
             IList<MonitoringFilterResult> filterResults,
             IList<IMonitoredItem> monitoredItems)
         {
-            if (itemsToCreate == null) throw new ArgumentNullException(nameof(itemsToCreate));
-            if (errors == null) throw new ArgumentNullException(nameof(errors));
-            if (issues.MaxSubscriptions > 0 && itemsToCreate.Count > issues.MaxSubscriptions)
-            {
-                errors.Add(StatusCodes.BadTooManyOperations);
-                return;
-            }
+            ArgumentNullException.ThrowIfNull(itemsToCreate);
+            ArgumentNullException.ThrowIfNull(errors);
+
+            callbacks.OnCreateMonitoredItems(context, subscriptionId, itemsToCreate);
 
             base.CreateMonitoredItems(context, subscriptionId, publishingInterval, timestampsToReturn, itemsToCreate, errors, filterResults, monitoredItems);
         }
@@ -105,13 +92,10 @@ namespace Server
             out HistoryReadResultCollection results,
             out DiagnosticInfoCollection diagnosticInfos)
         {
-            if (nodesToRead == null) throw new ArgumentNullException(nameof(nodesToRead));
-            if (issues.MaxHistoryNodes > 0 && nodesToRead.Count > issues.MaxHistoryNodes)
-            {
-                results = new HistoryReadResultCollection { new HistoryReadResult { StatusCode = StatusCodes.BadTooManyOperations } };
-                diagnosticInfos = new DiagnosticInfoCollection();
-                return;
-            }
+            ArgumentNullException.ThrowIfNull(nodesToRead);
+
+            callbacks.OnHistoryRead(context, historyReadDetails, nodesToRead);
+
             base.HistoryRead(context, historyReadDetails, timestampsToReturn, releaseContinuationPoints, nodesToRead, out results, out diagnosticInfos);
         }
 
@@ -123,33 +107,10 @@ namespace Server
             out BrowseResultCollection results,
             out DiagnosticInfoCollection diagnosticInfos)
         {
-            if (context == null) throw new ArgumentNullException(nameof(context));
-            if (nodesToBrowse == null) throw new ArgumentNullException(nameof(nodesToBrowse));
-            if (issues.MaxBrowseNodes > 0 && nodesToBrowse.Count > issues.MaxBrowseNodes)
-            {
-                results = new BrowseResultCollection() { new BrowseResult { StatusCode = StatusCodes.BadTooManyOperations } };
-                diagnosticInfos = new DiagnosticInfoCollection();
-                return;
-            }
+            ArgumentNullException.ThrowIfNull(context);
+            ArgumentNullException.ThrowIfNull(nodesToBrowse);
 
-            if (issues.RemainingBrowseCount > 0)
-            {
-                if (issues.RemainingBrowseCount == 1)
-                {
-                    results = new BrowseResultCollection { new BrowseResult { StatusCode = StatusCodes.BadTooManyOperations } };
-                    diagnosticInfos = new DiagnosticInfoCollection();
-                    issues.RemainingBrowseCount = 0;
-                    return;
-                }
-                issues.RemainingBrowseCount--;
-            }
-
-            if (issues.BrowseFailDenom > 0 && rand.NextInt64(0, issues.BrowseFailDenom) == 0)
-            {
-                results = new BrowseResultCollection() { new BrowseResult { StatusCode = StatusCodes.BadNoCommunication } };
-                diagnosticInfos = new DiagnosticInfoCollection();
-                return;
-            }
+            callbacks.OnBrowse(context, nodesToBrowse);
 
             base.Browse(context, view, maxReferencesPerNode, nodesToBrowse, out results, out diagnosticInfos);
 
@@ -172,6 +133,13 @@ namespace Server
                     count += result.References.Count;
                 }
             }
+        }
+
+        public override void BrowseNext(OperationContext context, bool releaseContinuationPoints, ByteStringCollection continuationPoints, out BrowseResultCollection results, out DiagnosticInfoCollection diagnosticInfos)
+        {
+            callbacks.OnBrowseNext(context, continuationPoints);
+
+            base.BrowseNext(context, releaseContinuationPoints, continuationPoints, out results, out diagnosticInfos);
         }
     }
 }

@@ -28,35 +28,36 @@ namespace Test.Unit
             tester.Client.TypeManager.Reset();
         }
 
-        [Fact]
+        [Fact(Timeout = 20000)]
         public async Task TestDpQueue()
         {
             using var pusher = new DummyPusher(new DummyPusherConfig());
 
-            pusher.UniqueToNodeId["id"] = (new NodeId("id"), -1);
+            pusher.UniqueToNodeId["id"] = (new NodeId("id", 0), -1);
             var dps = new List<UADataPoint>();
-            pusher.DataPoints[(new NodeId("id"), -1)] = dps;
+            pusher.DataPoints[(new NodeId("id", 0), -1)] = dps;
             using var extractor = tester.BuildExtractor(pushers: pusher);
 
             using var evt = new ManualResetEvent(false);
-
-            void DummyLooper(CancellationToken token)
-            {
-                if (token.IsCancellationRequested) return;
-                evt.Set();
-            }
-
-            extractor.Looper.Scheduler.SchedulePeriodicTask("Pushers", Timeout.InfiniteTimeSpan, DummyLooper, false);
 
             var queue = (Queue<UADataPoint>)extractor.Streamer.GetType()
                 .GetField("dataPointQueue", BindingFlags.NonPublic | BindingFlags.Instance)
                 .GetValue(extractor.Streamer);
 
+            void DummyLooper(CancellationToken token)
+            {
+                if (token.IsCancellationRequested) return;
+                Assert.True(queue.Count <= 1_000_000);
+                evt.Set();
+            }
+
+            extractor.Looper.Scheduler.SchedulePeriodicTask("Pushers", Timeout.InfiniteTimeSpan, DummyLooper, false);
+
             extractor.Streamer.AllowData = true;
             var start = DateTime.UtcNow;
 
             var state = new VariableExtractionState(tester.Client,
-                new UAVariable(new NodeId("id"), "test", null, null, NodeId.Null, null),
+                new UAVariable(new NodeId("id", 0), "test", null, null, NodeId.Null, null),
                 false, false, true);
             state.InitToEmpty();
             state.FinalizeRangeInit();
@@ -65,43 +66,53 @@ namespace Test.Unit
 
             Assert.False(evt.WaitOne(100));
 
-            extractor.Streamer.Enqueue(new UADataPoint(start, "id", -1));
+            await extractor.Streamer.EnqueueAsync(new UADataPoint(start, "id", -1, StatusCodes.Good));
             Assert.Single(queue);
             await extractor.Streamer.PushDataPoints(new[] { pusher }, Enumerable.Empty<IPusher>(), tester.Source.Token);
 
             Assert.Single(dps);
             Assert.Empty(queue);
 
-            extractor.Streamer.Enqueue(Enumerable.Range(0, 2000000).Select(idx => new UADataPoint(start.AddMilliseconds(idx), "id", idx)));
+            // Should block
+            var task = extractor.Streamer.EnqueueAsync(Enumerable.Range(0, 2_000_000).Select(idx => new UADataPoint(start.AddMilliseconds(idx), "id", idx, StatusCodes.Good)));
+
+            var wait = Task.Delay(100);
+            Assert.Equal(wait, await Task.WhenAny(wait, task));
 
             Assert.True(evt.WaitOne(10000));
-            Assert.Equal(2000000, queue.Count);
+            Assert.Equal(1_000_000, queue.Count);
+            evt.Reset();
+            await extractor.Streamer.PushDataPoints(new[] { pusher }, Enumerable.Empty<IPusher>(), tester.Source.Token);
+            Assert.True(evt.WaitOne(10000));
+            Assert.Equal(1_000_000, queue.Count);
+            evt.Reset();
+            // Should terminate
+            Assert.Equal(task, await Task.WhenAny(task, Task.Delay(500)));
             await extractor.Streamer.PushDataPoints(new[] { pusher }, Enumerable.Empty<IPusher>(), tester.Source.Token);
 
-            evt.Reset();
-            Assert.Equal(2000001, dps.Count);
+            Assert.Equal(2_000_001, dps.Count);
             Assert.Empty(queue);
 
-            extractor.Streamer.Enqueue(Enumerable.Range(2000000, 999999).Select(idx => new UADataPoint(start.AddMilliseconds(idx), "id", idx)));
+            await extractor.Streamer.EnqueueAsync(Enumerable.Range(2000000, 999999).Select(idx => new UADataPoint(start.AddMilliseconds(idx), "id", idx, StatusCodes.Good)));
 
             Assert.False(evt.WaitOne(100));
-            Assert.Equal(999999, queue.Count);
+            Assert.Equal(999_999, queue.Count);
 
-            extractor.Streamer.Enqueue(new UADataPoint(start.AddMilliseconds(3000000), "id", 300));
+            await extractor.Streamer.EnqueueAsync(new UADataPoint(start.AddMilliseconds(3000000), "id", 300, StatusCodes.Good));
             Assert.True(evt.WaitOne(10000));
-            Assert.Equal(1000000, queue.Count);
+            Assert.Equal(1_000_000, queue.Count);
 
             await extractor.Streamer.PushDataPoints(new[] { pusher }, Enumerable.Empty<IPusher>(), tester.Source.Token);
             Assert.Equal(start, state.DestinationExtractedRange.First);
             Assert.Equal(start.AddMilliseconds(3000000), state.DestinationExtractedRange.Last);
         }
-        [Fact]
+        [Fact(Timeout = 20000)]
         public async Task TestEventQueue()
         {
             using var pusher = new DummyPusher(new DummyPusherConfig());
             using var extractor = tester.BuildExtractor(pushers: pusher);
 
-            var id = new NodeId("id");
+            var id = new NodeId("id", 0);
 
             var queue = (Queue<UAEvent>)extractor.Streamer.GetType()
                 .GetField("eventQueue", BindingFlags.NonPublic | BindingFlags.Instance)
@@ -112,6 +123,7 @@ namespace Test.Unit
             void DummyLooper(CancellationToken token)
             {
                 if (token.IsCancellationRequested) return;
+                Assert.True(queue.Count <= 100_000);
                 evt.Set();
             }
 
@@ -120,14 +132,14 @@ namespace Test.Unit
             extractor.Streamer.AllowEvents = true;
             var start = DateTime.UtcNow;
 
-            var state = new EventExtractionState(tester.Client, new NodeId("id"), false, false, true);
+            var state = new EventExtractionState(tester.Client, new NodeId("id", 0), false, false, true);
             state.InitToEmpty();
             state.FinalizeRangeInit();
             extractor.State.SetEmitterState(state);
 
             Assert.False(evt.WaitOne(100));
 
-            extractor.Streamer.Enqueue(new UAEvent { EmittingNode = id, Time = start });
+            await extractor.Streamer.EnqueueAsync(new UAEvent { EmittingNode = id, Time = start });
             Assert.Single(queue);
             await extractor.Streamer.PushEvents(new[] { pusher }, Enumerable.Empty<IPusher>(), tester.Source.Token);
 
@@ -136,24 +148,32 @@ namespace Test.Unit
             Assert.Single(evts);
             Assert.Empty(queue);
 
-            extractor.Streamer.Enqueue(Enumerable.Range(0, 200000).Select(idx =>
+            // Should block
+            var task = extractor.Streamer.EnqueueAsync(Enumerable.Range(0, 200_000).Select(idx =>
                 new UAEvent { EmittingNode = id, Time = start.AddMilliseconds(idx) }));
 
+            var wait = Task.Delay(100);
+            Assert.Equal(wait, await Task.WhenAny(wait, task));
+
             Assert.True(evt.WaitOne(10000));
-            Assert.Equal(200000, queue.Count);
-            await extractor.Streamer.PushEvents(new[] { pusher }, Enumerable.Empty<IPusher>(), tester.Source.Token);
+            Assert.Equal(100_000, queue.Count);
             evt.Reset();
+            await extractor.Streamer.PushEvents(new[] { pusher }, Enumerable.Empty<IPusher>(), tester.Source.Token);
+            Assert.True(evt.WaitOne(10000));
+            Assert.Equal(100_000, queue.Count);
+            evt.Reset();
+            await extractor.Streamer.PushEvents(new[] { pusher }, Enumerable.Empty<IPusher>(), tester.Source.Token);
 
             Assert.Equal(200001, evts.Count);
             Assert.Empty(queue);
 
-            extractor.Streamer.Enqueue(Enumerable.Range(200000, 99999).Select(idx =>
+            await extractor.Streamer.EnqueueAsync(Enumerable.Range(200000, 99999).Select(idx =>
                 new UAEvent { EmittingNode = id, Time = start.AddMilliseconds(idx) }));
 
             Assert.False(evt.WaitOne(100));
             Assert.Equal(99999, queue.Count);
 
-            extractor.Streamer.Enqueue(new UAEvent { EmittingNode = id, Time = start.AddMilliseconds(300000) });
+            await extractor.Streamer.EnqueueAsync(new UAEvent { EmittingNode = id, Time = start.AddMilliseconds(300000) });
             Assert.True(evt.WaitOne(10000));
             Assert.Equal(100000, queue.Count);
 
@@ -169,13 +189,13 @@ namespace Test.Unit
             using var pusher = new DummyPusher(new DummyPusherConfig());
             using var pusher2 = new DummyPusher(new DummyPusherConfig());
 
-            pusher.UniqueToNodeId["id"] = (new NodeId("id"), -1);
+            pusher.UniqueToNodeId["id"] = (new NodeId("id", 0), -1);
             var dps = new List<UADataPoint>();
-            pusher.DataPoints[(new NodeId("id"), -1)] = dps;
+            pusher.DataPoints[(new NodeId("id", 0), -1)] = dps;
 
-            pusher2.UniqueToNodeId["id"] = (new NodeId("id"), -1);
+            pusher2.UniqueToNodeId["id"] = (new NodeId("id", 0), -1);
             var dps2 = new List<UADataPoint>();
-            pusher2.DataPoints[(new NodeId("id"), -1)] = dps2;
+            pusher2.DataPoints[(new NodeId("id", 0), -1)] = dps2;
 
             using var extractor = tester.BuildExtractor(true, null, pusher, pusher2);
 
@@ -183,7 +203,7 @@ namespace Test.Unit
             var start = DateTime.UtcNow;
 
             var state = new VariableExtractionState(tester.Client,
-                new UAVariable(new NodeId("id"), "test", null, null, NodeId.Null, null),
+                new UAVariable(new NodeId("id", 0), "test", null, null, NodeId.Null, null),
                 true, true, true);
             state.InitToEmpty();
             state.FinalizeRangeInit();
@@ -191,37 +211,33 @@ namespace Test.Unit
             state.UpdateFromFrontfill(DateTime.MinValue, true);
 
             extractor.State.SetNodeState(state, "id");
-            var toPush = Enumerable.Range(0, 1000).Select(idx => new UADataPoint(start.AddMilliseconds(idx), "id", idx)).ToList();
-            extractor.Streamer.Enqueue(toPush);
-            bool result = await extractor.Streamer.PushDataPoints(new[] { pusher, pusher2 }, Enumerable.Empty<IPusher>(), tester.Source.Token);
+            var toPush = Enumerable.Range(0, 1000).Select(idx => new UADataPoint(start.AddMilliseconds(idx), "id", idx, StatusCodes.Good)).ToList();
+            await extractor.Streamer.EnqueueAsync(toPush);
+            await extractor.Streamer.PushDataPoints(new[] { pusher, pusher2 }, Enumerable.Empty<IPusher>(), tester.Source.Token);
             Assert.Equal(1000, dps.Count);
             Assert.Equal(1000, dps2.Count);
-            Assert.False(result);
 
             Assert.Equal(dps, dps2);
 
             pusher.PushDataPointResult = false;
-            extractor.Streamer.Enqueue(toPush);
-            result = await extractor.Streamer.PushDataPoints(new[] { pusher, pusher2 }, Enumerable.Empty<IPusher>(), tester.Source.Token);
+            await extractor.Streamer.EnqueueAsync(toPush);
+            await extractor.Streamer.PushDataPoints(new[] { pusher, pusher2 }, Enumerable.Empty<IPusher>(), tester.Source.Token);
             Assert.True(pusher.DataFailing);
             Assert.Equal(1000, dps.Count);
             Assert.Equal(2000, dps2.Count);
-            Assert.False(result);
 
-            extractor.Streamer.Enqueue(toPush);
-            result = await extractor.Streamer.PushDataPoints(new[] { pusher2 }, new[] { pusher }, tester.Source.Token);
+            await extractor.Streamer.EnqueueAsync(toPush);
+            await extractor.Streamer.PushDataPoints(new[] { pusher2 }, new[] { pusher }, tester.Source.Token);
             Assert.True(pusher.DataFailing);
             Assert.Equal(1000, dps.Count);
             Assert.Equal(3000, dps2.Count);
-            Assert.False(result);
 
-            extractor.Streamer.Enqueue(toPush);
+            await extractor.Streamer.EnqueueAsync(toPush);
             pusher.PushDataPointResult = true;
-            result = await extractor.Streamer.PushDataPoints(new[] { pusher2, pusher }, Enumerable.Empty<IPusher>(), tester.Source.Token);
+            await extractor.Streamer.PushDataPoints(new[] { pusher2, pusher }, Enumerable.Empty<IPusher>(), tester.Source.Token);
             Assert.False(pusher.DataFailing);
             Assert.Equal(2000, dps.Count);
             Assert.Equal(4000, dps2.Count);
-            Assert.True(result);
         }
         [Fact]
         public async Task TestPushEvents()
@@ -236,7 +252,7 @@ namespace Test.Unit
             extractor.Streamer.AllowEvents = true;
             var start = DateTime.UtcNow;
 
-            var id = new NodeId("id");
+            var id = new NodeId("id", 0);
 
             var state = new EventExtractionState(tester.Client, id, true, true, true);
             state.InitToEmpty();
@@ -246,46 +262,42 @@ namespace Test.Unit
 
             extractor.State.SetEmitterState(state);
             var toPush = Enumerable.Range(0, 1000).Select(idx => new UAEvent { Time = start.AddMilliseconds(idx), EmittingNode = id }).ToList();
-            extractor.Streamer.Enqueue(toPush);
-            bool result = await extractor.Streamer.PushEvents(new[] { pusher, pusher2 }, Enumerable.Empty<IPusher>(), tester.Source.Token);
+            await extractor.Streamer.EnqueueAsync(toPush);
+            await extractor.Streamer.PushEvents(new[] { pusher, pusher2 }, Enumerable.Empty<IPusher>(), tester.Source.Token);
 
             var evts = pusher.Events[id];
             var evts2 = pusher2.Events[id];
 
             Assert.Equal(1000, evts.Count);
             Assert.Equal(1000, evts2.Count);
-            Assert.False(result);
 
             Assert.Equal(evts, evts2);
 
             pusher.PushEventResult = false;
-            extractor.Streamer.Enqueue(toPush);
-            result = await extractor.Streamer.PushEvents(new[] { pusher, pusher2 }, Enumerable.Empty<IPusher>(), tester.Source.Token);
+            await extractor.Streamer.EnqueueAsync(toPush);
+            await extractor.Streamer.PushEvents(new[] { pusher, pusher2 }, Enumerable.Empty<IPusher>(), tester.Source.Token);
             Assert.True(pusher.EventsFailing);
             Assert.Equal(1000, evts.Count);
             Assert.Equal(2000, evts2.Count);
-            Assert.False(result);
 
-            extractor.Streamer.Enqueue(toPush);
-            result = await extractor.Streamer.PushEvents(new[] { pusher2 }, new[] { pusher }, tester.Source.Token);
+            await extractor.Streamer.EnqueueAsync(toPush);
+            await extractor.Streamer.PushEvents(new[] { pusher2 }, new[] { pusher }, tester.Source.Token);
             Assert.True(pusher.EventsFailing);
             Assert.Equal(1000, evts.Count);
             Assert.Equal(3000, evts2.Count);
-            Assert.False(result);
 
-            extractor.Streamer.Enqueue(toPush);
+            await extractor.Streamer.EnqueueAsync(toPush);
             pusher.PushEventResult = true;
-            result = await extractor.Streamer.PushEvents(new[] { pusher2, pusher }, Enumerable.Empty<IPusher>(), tester.Source.Token);
+            await extractor.Streamer.PushEvents(new[] { pusher2, pusher }, Enumerable.Empty<IPusher>(), tester.Source.Token);
             Assert.False(pusher.EventsFailing);
             Assert.Equal(2000, evts.Count);
             Assert.Equal(4000, evts2.Count);
-            Assert.True(result);
         }
         [Fact]
         public void TestDataHandler()
         {
             using var extractor = tester.BuildExtractor();
-            var var1 = new UAVariable(new NodeId("id"), "node", null, null, NodeId.Null, null);
+            var var1 = new UAVariable(new NodeId("id", 0), "node", null, null, NodeId.Null, null);
             var1.FullAttributes.DataType = new UADataType(DataTypeIds.Double);
             var node = new VariableExtractionState(tester.Client, var1, true, true, true);
             extractor.State.SetNodeState(node, "id");
@@ -302,7 +314,7 @@ namespace Test.Unit
             CommonTestUtils.ResetMetricValue("opcua_bad_datapoints");
 
             // Test against existing node
-            var item = new MonitoredItem() { StartNodeId = new NodeId("id"), CacheQueueSize = 10 };
+            var item = new MonitoredItem() { StartNodeId = new NodeId("id", 0), CacheQueueSize = 10 };
             var values = new[]
             {
                 (DateTime.UtcNow, 100.0, StatusCodes.Good), // OK value
@@ -333,7 +345,7 @@ namespace Test.Unit
 
             Assert.True(CommonTestUtils.TestMetricValue("opcua_bad_datapoints", 3));
 
-            var item2 = new MonitoredItem() { StartNodeId = new NodeId("otherid"), CacheQueueSize = 10 };
+            var item2 = new MonitoredItem() { StartNodeId = new NodeId("otherid", 0), CacheQueueSize = 10 };
             foreach (var not in notifications) item2.SaveValueInCache(not);
             extractor.Streamer.DataSubscriptionHandler(item2, null);
 
@@ -344,7 +356,7 @@ namespace Test.Unit
         {
             CommonTestUtils.ResetMetricValue("opcua_array_points_missed");
             using var extractor = tester.BuildExtractor();
-            var var1 = new UAVariable(new NodeId("id"), "node", null, null, NodeId.Null, null);
+            var var1 = new UAVariable(new NodeId("id", 0), "node", null, null, NodeId.Null, null);
             var1.FullAttributes.DataType = new UADataType(DataTypeIds.Double);
             var node1 = new VariableExtractionState(tester.Client, var1, true, true, true);
 
@@ -441,8 +453,8 @@ namespace Test.Unit
                 .GetField("eventQueue", BindingFlags.NonPublic | BindingFlags.Instance)
                 .GetValue(extractor.Streamer);
 
-            var item = new MonitoredItem() { StartNodeId = new NodeId("emitter"), NodeClass = NodeClass.Object };
-            var item2 = new MonitoredItem() { StartNodeId = new NodeId("someotherid"), NodeClass = NodeClass.Object };
+            var item = new MonitoredItem() { StartNodeId = new NodeId("emitter", 0), NodeClass = NodeClass.Object };
+            var item2 = new MonitoredItem() { StartNodeId = new NodeId("someotherid", 0), NodeClass = NodeClass.Object };
 
             var values = EventUtils.GetEventValues(DateTime.UtcNow);
             var rawEvt = new EventFieldList { EventFields = values };
@@ -462,7 +474,7 @@ namespace Test.Unit
 
             // Test null eventFields
             var rawEvt2 = new EventFieldList { EventFields = null };
-            item2.StartNodeId = new NodeId("emitter");
+            item2.StartNodeId = new NodeId("emitter", 0);
             item2.SaveValueInCache(rawEvt2);
             extractor.Streamer.EventSubscriptionHandler(item2, null);
             Assert.Empty(queue);
@@ -525,7 +537,7 @@ namespace Test.Unit
 
             var filter = new EventFilter { SelectClauses = EventUtils.GetSelectClause(tester) };
             var values = EventUtils.GetEventValues(DateTime.UtcNow);
-            var emitter = new NodeId("emitter");
+            var emitter = new NodeId("emitter", 0);
 
             UAEvent created = null;
 
@@ -534,8 +546,8 @@ namespace Test.Unit
             Assert.NotNull(created);
             Assert.Equal(emitter, created.EmittingNode);
             Assert.Equal("message", created.Message);
-            Assert.Equal(new NodeId("source"), created.SourceNode);
-            Assert.Equal(new NodeId("test"), created.EventType.Id);
+            Assert.Equal(new NodeId("source", 0), created.SourceNode);
+            Assert.Equal(new NodeId("test", 0), created.EventType.Id);
             Assert.Equal(DateTime.UtcNow, created.Time, TimeSpan.FromMinutes(10));
             Assert.Single(created.MetaData);
             Assert.True(created.MetaData.ContainsKey("EUProp"));
@@ -552,7 +564,7 @@ namespace Test.Unit
 
             // Bad type
             var badTypeValues = EventUtils.GetEventValues(DateTime.UtcNow);
-            badTypeValues[2] = new NodeId("SomeOtherType");
+            badTypeValues[2] = new NodeId("SomeOtherType", 0);
             created = extractor.Streamer.ConstructEvent(filter, badTypeValues, emitter);
             Assert.Null(created);
 
@@ -585,7 +597,7 @@ namespace Test.Unit
         {
             CommonTestUtils.ResetMetricValue("opcua_array_points_missed");
             using var extractor = tester.BuildExtractor();
-            var var1 = new UAVariable(new NodeId("id"), "node", null, null, NodeId.Null, null);
+            var var1 = new UAVariable(new NodeId("id", 0), "node", null, null, NodeId.Null, null);
             var1.FullAttributes.DataType = new UADataType(DataTypeIds.Double);
             var1.AsEvents = true;
             var node1 = new VariableExtractionState(tester.Client, var1, true, true, true);

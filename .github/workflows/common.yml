@@ -62,7 +62,7 @@ jobs:
             run: echo "rpmver=$(echo "${{ steps.get-version.outputs.version}}" | tr - _)" >> "$GITHUB_OUTPUT"
 
           - name: Message about build
-            uses: actions/github-script@v6
+            uses: actions/github-script@v7
             with:
                 script: |
                     if (${{ steps.confirm-release.outputs.test }} == 0) {
@@ -79,9 +79,9 @@ jobs:
         steps:
           - uses: actions/checkout@v4
           - name: Setup .NET
-            uses: actions/setup-dotnet@v3
+            uses: actions/setup-dotnet@v4
             with:
-                dotnet-version: 7.0.x
+                dotnet-version: 8.0.x
           - name: Restore dependencies
             run: dotnet restore
 
@@ -145,7 +145,7 @@ jobs:
           - run: mv .\OpcUaExtractorSetup\bin\Release\OpcUaExtractorSetup.msi .\OpcUaExtractorSetup-${{ needs.prerequisites.outputs.version }}.msi
 
           - name: Upload artifacts
-            uses: actions/upload-artifact@v3
+            uses: actions/upload-artifact@v4
             if: ${{ needs.prerequisites.outputs.should-release == 0 && needs.prerequisites.outputs.branch == 'master' }}
             with:
                 name: installer
@@ -159,9 +159,9 @@ jobs:
         steps:
           - uses: actions/checkout@v4
           - name: Setup .NET
-            uses: actions/setup-dotnet@v3
+            uses: actions/setup-dotnet@v4
             with:
-                dotnet-version: 7.0.x
+                dotnet-version: 8.0.x
           - name: Restore dependencies
             run: dotnet restore
 
@@ -215,7 +215,7 @@ jobs:
               mv ./opcua-extractor_${{ needs.prerequisites.outputs.version }}_amd64.deb artifacts/
 
           - name: Upload artifacts
-            uses: actions/upload-artifact@v3
+            uses: actions/upload-artifact@v4
             if: ${{ needs.prerequisites.outputs.should-release == 0 && needs.prerequisites.outputs.branch == 'master' }}
             with:
               name: linux-artifacts

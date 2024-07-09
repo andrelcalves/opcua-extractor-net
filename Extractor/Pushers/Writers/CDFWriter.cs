@@ -8,6 +8,7 @@ using Cognite.OpcUa.Config;
 using Cognite.OpcUa.Nodes;
 using Cognite.OpcUa.Pushers.FDM;
 using Cognite.OpcUa.Types;
+using CogniteSdk;
 using Microsoft.Extensions.Logging;
 using Opc.Ua;
 
@@ -105,7 +106,7 @@ namespace Cognite.OpcUa.Pushers.Writers
             }
 
             // Raw assets and timeseries
-            if (assetMap.Any() && raw != null)
+            if (assetMap.Count != 0 && raw != null)
             {
                 tasks.Add(Task.Run(async () =>
                 {
@@ -113,7 +114,7 @@ namespace Cognite.OpcUa.Pushers.Writers
                 }));
             }
 
-            if (timeseriesMap.Any() && raw != null)
+            if (timeseriesMap.Count != 0 && raw != null)
             {
                 tasks.Add(Task.Run(async () =>
                 {
@@ -131,7 +132,7 @@ namespace Cognite.OpcUa.Pushers.Writers
         }
 
 
-        public async Task ExecuteDeletes(DeletedNodes deletes, CancellationToken token)
+        public async Task ExecuteDeletes(DeletedNodes deletes, UAExtractor extractor, CancellationToken token)
         {
             var tasks = new List<Task>();
             if (raw != null)
@@ -142,7 +143,11 @@ namespace Cognite.OpcUa.Pushers.Writers
             {
                 tasks.Add(clean.MarkDeleted(deletes, token));
             }
-            tasks.Add(timeseries.MarkTimeseriesDeleted(deletes.Variables, token));
+            tasks.Add(timeseries.MarkTimeseriesDeleted(deletes.Variables.Select(d => d.Id), token));
+            if (fdm != null)
+            {
+                tasks.Add(fdm.DeleteInFdm(deletes, extractor.Context, token));
+            }
 
             await Task.WhenAll(tasks);
         }
@@ -162,7 +167,15 @@ namespace Cognite.OpcUa.Pushers.Writers
             catch (Exception ex)
             {
                 log.LogError(ex, "Failed to push nodes to CDF Data Models: {Message}", ex.Message);
-                pushResult = false;
+                if (ex is ResponseException rex && rex.Code < 500)
+                {
+                    log.LogWarning("Failed to push nodes to Data Models with a non-transient error, pushing will not be retried.");
+                    pushResult = true;
+                }
+                else
+                {
+                    pushResult = false;
+                }
             }
             result.Variables &= pushResult;
             result.Objects &= pushResult;

@@ -1,12 +1,12 @@
-﻿using Cognite.OpcUa.Config;
-using Microsoft.Extensions.Logging;
-using Opc.Ua;
-using Opc.Ua.Client;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Cognite.OpcUa.Config;
+using Microsoft.Extensions.Logging;
+using Opc.Ua;
+using Opc.Ua.Client;
 
 namespace Cognite.OpcUa.Subscriptions
 {
@@ -16,8 +16,8 @@ namespace Cognite.OpcUa.Subscriptions
 
         public override string TaskName => $"Recreate subscription {oldSubscription.Id}";
 
-        public RecreateSubscriptionTask(Subscription oldSubscription)
-            : base(Enum.Parse<SubscriptionName>(oldSubscription.DisplayName.Split(' ').First()), new Dictionary<Opc.Ua.NodeId, MonitoredItem>())
+        public RecreateSubscriptionTask(Subscription oldSubscription, SubscriptionName subscription, IClientCallbacks callbacks)
+            : base(subscription, oldSubscription.MonitoredItems.ToDictionary(item => item.StartNodeId), callbacks)
         {
             this.oldSubscription = oldSubscription;
         }
@@ -29,7 +29,10 @@ namespace Cognite.OpcUa.Subscriptions
             // If the session is currently unset, we will recreate all subscriptions eventually,
             // so no point to doing it now.
             if (session == null) return false;
-            if (!oldSubscription.PublishingStopped) return false;
+            if (!oldSubscription.PublishingStopped)
+            {
+                return false;
+            }
             if (!session.Subscriptions.Any(s => s.Id == oldSubscription.Id)) return false;
             try
             {
@@ -42,13 +45,16 @@ namespace Cognite.OpcUa.Subscriptions
                 var dv = result.Results.First();
                 var state = (ServerState)(int)dv.Value;
                 // If the server is in a bad state that is why the subscription is failing
-                logger.LogWarning("Server is in a non-running state {State}, not recreating subscription {Name}",
-                    state, SubscriptionName);
-                if (state != ServerState.Running) return false;
+
+                if (state != ServerState.Running)
+                {
+                    logger.LogWarning("Server is in a non-running state {State}, not recreating subscription {Name}", state, SubscriptionName);
+                    return false;
+                }
             }
             catch (Exception ex)
             {
-                logger.LogError("Failed to obtain server state when checking a failing subscription. Server is likely down: ", ex.Message);
+                logger.LogError("Failed to obtain server state when checking a failing subscription. Server is likely down: {}", ex.Message);
                 return false;
             }
 
@@ -64,25 +70,41 @@ namespace Cognite.OpcUa.Subscriptions
 
             var subState = subManager.Cache.GetSubscriptionState(SubscriptionName);
             if (subState == null) return;
+
+            var grace = config.Subscriptions.RecreateSubscriptionGracePeriodValue.Value;
+            if (grace == Timeout.InfiniteTimeSpan) grace = TimeSpan.FromMilliseconds(oldSubscription.CurrentPublishingInterval * 8);
+
             var diff = DateTime.UtcNow - subState.LastModifiedTime;
-            if (diff < TimeSpan.FromMilliseconds(oldSubscription.CurrentPublishingInterval * 4))
+            if (diff < TimeSpan.FromMilliseconds(oldSubscription.CurrentPublishingInterval * 8))
             {
-                logger.LogWarning("Subscription was updated {Time} ago. Waiting until 4 * publishing interval has passed before recreating",
-                    diff);
-                await Task.Delay(diff, token);
+                logger.LogWarning("Subscription {Name} was updated {Time} ago. Waiting until {Grace} has passed before recreating",
+                    SubscriptionName, diff, grace);
+                await Task.Delay(grace - diff, token);
             }
 
-            if (!oldSubscription.PublishingStopped) return;
+            if (!await ShouldRun(logger, sessionManager, token)) return;
 
             try
             {
-                logger.LogWarning("Server is available, but subscription is not responding to notifications. Attempting to recreate.");
+                logger.LogWarning("Server is available, but subscription {Name} is not responding to notifications. Attempting to recreate.", SubscriptionName);
+                Callbacks.OnSubscriptionFailure(SubscriptionName);
                 await session.RemoveSubscriptionAsync(oldSubscription);
             }
             catch (ServiceResultException serviceEx)
             {
                 var symId = StatusCode.LookupSymbolicId(serviceEx.StatusCode);
-                logger.LogWarning("Error attempting to remove subscription from the server: {Err}. It has most likely been dropped. Attempting to recreate...", symId);
+                logger.LogWarning("Error attempting to remove subscription {Name} from the server: {Err}. It has most likely been dropped. Attempting to recreate...", SubscriptionName, symId);
+                // Second attempt shouldn't fail, and doesn't seem to, keeping this here as a backup.
+                try
+                {
+                    await session.RemoveSubscriptionAsync(oldSubscription);
+                }
+                catch
+                {
+                    // This is not supposed to be used this way, but this method should be a foolproof way
+                    // of ensuring the subscription gets removed properly.
+                    session.RemoveTransferredSubscription(oldSubscription);
+                }
             }
             finally
             {

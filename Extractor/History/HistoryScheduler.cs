@@ -66,12 +66,13 @@ namespace Cognite.OpcUa.History
     {
         private readonly UAClient uaClient;
         private readonly UAExtractor extractor;
-        private readonly HistoryConfig config;
+        private HistoryConfig Config => fullConfig.History;
+        private readonly FullConfig fullConfig;
         private readonly TypeManager typeManager;
 
         private readonly HistoryReadType type;
         private readonly DateTime historyStartTime;
-        private readonly DateTime? historyEndTime;
+        private readonly DateTime historyEndTime;
         private readonly TimeSpan historyGranularity;
         private readonly ILogger log;
 
@@ -94,46 +95,81 @@ namespace Cognite.OpcUa.History
             UAClient uaClient,
             UAExtractor extractor,
             TypeManager typeManager,
-            HistoryConfig config,
+            FullConfig config,
             HistoryReadType type,
             TaskThrottler throttler,
             IResourceCounter resource,
             IEnumerable<UAHistoryExtractionState> states,
             CancellationToken token)
             : base(
-                  GetNodes(states, log, type, config.StartTime, out var count),
+                  GetNodes(states, log, type, config.History.StartTime, out var count),
                   throttler,
                   (type == HistoryReadType.FrontfillData || type == HistoryReadType.BackfillData)
-                    ? config.DataNodesChunk
-                    : config.EventNodesChunk,
+                    ? config.History.DataNodesChunk
+                    : config.History.EventNodesChunk,
                   resource,
                   token)
         {
             this.log = log;
             this.uaClient = uaClient;
             this.extractor = extractor;
-            this.config = config;
+            fullConfig = config;
             this.type = type;
             this.typeManager = typeManager;
-            chunkSize = Data ? config.DataNodesChunk : config.EventNodesChunk;
+            chunkSize = Data ? config.History.DataNodesChunk : config.History.EventNodesChunk;
 
-            maxReadLength = config.MaxReadLengthValue.Value;
+            maxReadLength = config.History.MaxReadLengthValue.Value;
             if (maxReadLength == TimeSpan.Zero || maxReadLength == Timeout.InfiniteTimeSpan) maxReadLength = null;
 
             nodeCount = count;
 
-            thresholdManager = new FailureThresholdManager<NodeId, Exception>(config.ErrorThreshold, nodeCount, (x) =>
+            thresholdManager = new FailureThresholdManager<NodeId, Exception>(config.History.ErrorThreshold, nodeCount, (x) =>
             {
                 exceptions = x;
                 TokenSource.Cancel();
             });
 
-            historyStartTime = GetStartTime(config.StartTime);
-            if (!string.IsNullOrWhiteSpace(config.EndTime)) historyEndTime = CogniteTime.ParseTimestampString(config.EndTime)!;
+            historyStartTime = GetStartTime(config.History.StartTime);
+            if (!string.IsNullOrWhiteSpace(config.History.EndTime))
+            {
+                var endTime = CogniteTime.ParseTimestampString(config.History.EndTime)!;
+                if (endTime.HasValue)
+                {
+                    historyEndTime = endTime.Value;
+                }
+                else
+                {
+                    log.LogWarning("Failed to parse timestamp from end-time string {Conf}", config.History.EndTime);
+                    historyEndTime = DefaultEndTime();
+                }
+            }
+            else
+            {
+                historyEndTime = DefaultEndTime();
+            }
 
-            historyGranularity = config.GranularityValue.Value;
+            if (historyStartTime != null && historyEndTime != null && historyStartTime >= historyEndTime)
+            {
+                throw new ConfigurationException(
+                    $"History start time must be less than history end time. Start time is {historyStartTime}, end time is {historyEndTime}");
+            }
+
+            historyGranularity = config.History.GranularityValue.Value;
 
             metrics = new HistoryMetrics(type);
+        }
+
+        private DateTime DefaultEndTime()
+        {
+            // Need to avoid reading far into the future if maxReadLength is specified, since that can cause crazy issues.
+            // If users want to use maxReadLength properly they just have to set their own end time.
+            if (maxReadLength.HasValue)
+            {
+                log.LogWarning("max-read-length is set without setting end-time. End time is set to current time + max-read-length, "
+                    + "but it is strongly recommended to explicitly configure end-time when using max-read-length.");
+                return DateTime.UtcNow.Add(maxReadLength.Value);
+            }
+            return DateTime.UtcNow.AddDays(1);
         }
 
         private static DateTime GetStartTime(string? start)
@@ -170,12 +206,12 @@ namespace Cognite.OpcUa.History
         }
 
 
-        protected override void AbortChunk(IChunk<HistoryReadNode> chunk, CancellationToken token)
+        protected override async Task AbortChunk(IChunk<HistoryReadNode> chunk, CancellationToken token)
         {
             var readChunk = (HistoryReadParams)chunk;
             try
             {
-                uaClient.AbortHistoryRead(readChunk, CancellationToken.None).Wait(CancellationToken.None);
+                await uaClient.AbortHistoryRead(readChunk, CancellationToken.None);
             }
             catch (Exception ex)
             {
@@ -183,6 +219,7 @@ namespace Cognite.OpcUa.History
             }
             foreach (var item in chunk.Items)
             {
+                log.LogDebug("Aborted history read for node {Id}", item.Id);
                 item.Completed = true;
                 item.ContinuationPoint = null;
             }
@@ -199,11 +236,11 @@ namespace Cognite.OpcUa.History
             if (Frontfill)
             {
                 min = Max(nodes.First().Time, historyStartTime);
-                if (maxReadLength == null) max = historyEndTime ?? DateTime.MinValue;
+                if (maxReadLength == null) max = historyEndTime;
                 else
                 {
                     max = min + maxReadLength.Value;
-                    if (max > (historyEndTime ?? DateTime.UtcNow)) max = historyEndTime ?? DateTime.MinValue;
+                    if (max > historyEndTime) max = historyEndTime;
                 }
             }
             else
@@ -219,6 +256,8 @@ namespace Cognite.OpcUa.History
         {
             HistoryReadDetails details;
             var (min, max) = GetReadRange(nodes);
+            log.LogDebug("Read {Type} history chunk for {Count} nodes from {Min} to {Max}",
+                type, nodes.Count(), min, max);
             switch (type)
             {
                 case HistoryReadType.FrontfillData:
@@ -227,7 +266,7 @@ namespace Cognite.OpcUa.History
                         IsReadModified = false,
                         StartTime = min,
                         EndTime = max,
-                        NumValuesPerNode = (uint)config.DataChunk
+                        NumValuesPerNode = (uint)Config.DataChunk
                     };
                     break;
                 case HistoryReadType.BackfillData:
@@ -236,7 +275,7 @@ namespace Cognite.OpcUa.History
                         IsReadModified = false,
                         StartTime = min,
                         EndTime = max,
-                        NumValuesPerNode = (uint)config.DataChunk
+                        NumValuesPerNode = (uint)Config.DataChunk
                     };
                     break;
                 case HistoryReadType.FrontfillEvents:
@@ -244,7 +283,7 @@ namespace Cognite.OpcUa.History
                     {
                         StartTime = min,
                         EndTime = max,
-                        NumValuesPerNode = (uint)config.EventChunk,
+                        NumValuesPerNode = (uint)Config.EventChunk,
                         Filter = uaClient.BuildEventFilter(typeManager.EventFields)
                     };
                     break;
@@ -253,7 +292,7 @@ namespace Cognite.OpcUa.History
                     {
                         StartTime = min,
                         EndTime = max,
-                        NumValuesPerNode = (uint)config.EventChunk,
+                        NumValuesPerNode = (uint)Config.EventChunk,
                         Filter = uaClient.BuildEventFilter(typeManager.EventFields)
                     };
                     break;
@@ -373,7 +412,7 @@ namespace Cognite.OpcUa.History
 
         private static void LogHistoryTermination(ILogger log, List<HistoryReadNode> toTerminate, HistoryReadType type)
         {
-            if (!toTerminate.Any()) return;
+            if (toTerminate.Count == 0) return;
             string name = GetResourceName(type);
             var builder = new StringBuilder();
             foreach (var node in toTerminate)
@@ -389,7 +428,7 @@ namespace Cognite.OpcUa.History
             log.LogDebug("Finish reading {Type}. Retrieved: {Data}", name, builder);
         }
 
-        protected override IEnumerable<HistoryReadNode> HandleTaskResult(IChunk<HistoryReadNode> chunk, CancellationToken token)
+        protected override async Task<IEnumerable<HistoryReadNode>> HandleTaskResult(IChunk<HistoryReadNode> chunk, CancellationToken token)
         {
             var readChunk = (HistoryReadParams)chunk;
 
@@ -403,7 +442,7 @@ namespace Cognite.OpcUa.History
                 {
                     thresholdManager.Failed(node.Id, chunk.Exception);
                 }
-                AbortChunk(chunk, token);
+                await AbortChunk(chunk, token);
                 return Enumerable.Empty<HistoryReadNode>();
             }
 
@@ -421,14 +460,14 @@ namespace Cognite.OpcUa.History
 
                 if (Data)
                 {
-                    HistoryDataHandler(node);
+                    await HistoryDataHandler(node);
                 }
                 else
                 {
-                    HistoryEventHandler(node, readChunk.Details);
+                    await HistoryEventHandler(node, readChunk.Details);
                 }
 
-                if (config.IgnoreContinuationPoints)
+                if (Config.IgnoreContinuationPoints)
                 {
                     node.ContinuationPoint = null;
                 }
@@ -436,7 +475,7 @@ namespace Cognite.OpcUa.History
                 metrics.NumItems.Inc(node.LastRead);
             }
 
-            if (failed.Any())
+            if (failed.Count != 0)
             {
                 log.LogError("HistoryRead {Type} failed for {Nodes}", type, string.Join(", ", failed.Select(f => $"{f.id}: {f.status}")));
             }
@@ -453,13 +492,65 @@ namespace Cognite.OpcUa.History
                 type, pending, operations, finished, total);
         }
 
+        private bool IsNodeCompleted(HistoryReadNode node, DateTime first, DateTime last, bool anyValues)
+        {
+            if (maxReadLength != null)
+            {
+                // When reading with maxReadLength, the absence of a continuation point or no more values is not sufficient
+                // to determine that we're done. We _also_ need to be reading data outside of the configured time range.
+                if (Frontfill)
+                {
+                    if (node.EndTime != DateTime.MinValue && (historyEndTime == null || node.EndTime < historyEndTime))
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    if (node.EndTime > historyStartTime)
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            if (Config.IgnoreContinuationPoints)
+            {
+                if (!anyValues)
+                {
+                    log.LogDebug("Setting history node {Id} to completed because a history read request returned no values", node.Id);
+                    return true;
+                }
+                else if (Frontfill && first == last && last == node.State.SourceExtractedRange.Last
+                    || !Frontfill && first == last && last == node.State.SourceExtractedRange.First)
+                {
+                    log.LogDebug("Setting history node {Id} to completed because only a single value with timestamp equal to the end of the range was returned {Ts}",
+                        node.Id, first);
+                    return true;
+                }
+                else if (!Frontfill && last <= historyStartTime || Frontfill && historyEndTime != null && first >= historyEndTime)
+                {
+                    log.LogDebug("Setting history node {Id} to completed because all values are outside of (start-time, end-time), ({St}, {Et})",
+                        node.Id, historyStartTime, historyEndTime);
+                    return true;
+                }
+            }
+            else if (node.ContinuationPoint == null)
+            {
+                log.LogDebug("Setting history node {Id} to completed because it received no continuation point from the server", node.Id);
+                return true;
+            }
+
+            return false;
+        }
+
 
         /// <summary>
         /// Handle the result of a historyReadRaw. Takes information about the read, updates states and sends datapoints to the streamer.
         /// </summary>
         /// <param name="node">Active HistoryReadNode</param>
         /// <returns>Number of points read</returns>
-        private void HistoryDataHandler(HistoryReadNode node)
+        private async Task HistoryDataHandler(HistoryReadNode node)
         {
             var data = node.LastResult as HistoryData;
             node.LastResult = null;
@@ -475,68 +566,68 @@ namespace Cognite.OpcUa.History
                 return;
             }
 
+            var last = DateTime.MinValue;
+            var first = DateTime.MaxValue;
+
+            var goodLast = DateTime.MinValue;
+            var goodFirst = DateTime.MaxValue;
             List<DataValue> dataPoints = new List<DataValue>(data?.DataValues?.Count ?? 0);
             if (data?.DataValues != null)
             {
                 int badDps = 0;
                 foreach (var dp in data.DataValues)
                 {
+                    if (StatusCode.IsGood(dp.StatusCode))
+                    {
+                        goodFirst = CogniteTime.Min(goodFirst, dp.SourceTimestamp);
+                        goodLast = CogniteTime.Max(goodLast, dp.SourceTimestamp);
+                    }
+                    first = CogniteTime.Min(first, dp.SourceTimestamp);
+                    last = CogniteTime.Max(last, dp.SourceTimestamp);
+
                     if (StatusCode.IsNotGood(dp.StatusCode))
                     {
                         UAExtractor.BadDataPoints.Inc();
 
                         badDps++;
-                        if (config.LogBadValues)
+                        if (Config.LogBadValues)
                         {
                             log.LogTrace("Bad history datapoint: {BadDatapointExternalId} {SourceTimestamp}. Value: {Value}, Status: {Status}",
                                 node.State.Id, dp.SourceTimestamp, dp.Value, ExtractorUtils.GetStatusCodeName((uint)dp.StatusCode));
                         }
-                        continue;
+
+                        switch (fullConfig.Extraction.StatusCodes.StatusCodesToIngest)
+                        {
+                            case StatusCodeMode.All:
+                                break;
+                            case StatusCodeMode.Uncertain:
+                                if (!StatusCode.IsUncertain(dp.StatusCode))
+                                {
+                                    continue;
+                                }
+                                break;
+                            case StatusCodeMode.GoodOnly:
+                                continue;
+                        }
                     }
                     dataPoints.Add(dp);
                 }
-                if (badDps > 0 && config.LogBadValues)
+                if (badDps > 0 && Config.LogBadValues)
                 {
                     log.LogDebug("Received {Count} bad history datapoints for {BadDatapointExternalId}",
                         badDps, node.State.Id);
                 }
             }
 
-            var last = DateTime.MinValue;
-            var first = DateTime.MaxValue;
-
-            if (dataPoints.Any())
-            {
-                (first, last) = dataPoints.MinMax(dp => dp.SourceTimestamp);
-            }
-
-            if (config.IgnoreContinuationPoints)
-            {
-                node.Completed = !dataPoints.Any()
-                    || Frontfill && first == last && last == node.State.SourceExtractedRange.Last
-                    || !Frontfill && first == last && last == node.State.SourceExtractedRange.First
-                    || !Frontfill && last <= historyStartTime;
-            }
-
-            if (maxReadLength != null)
-            {
-                if (Frontfill)
-                {
-                    node.Completed &= historyEndTime != null && node.EndTime >= historyEndTime || node.EndTime == DateTime.MinValue;
-                }
-                else
-                {
-                    node.Completed &= node.EndTime <= historyStartTime;
-                }
-            }
+            node.Completed = IsNodeCompleted(node, first, last, data?.DataValues != null && data.DataValues.Count > 0);
 
             if (Frontfill)
             {
-                node.State.UpdateFromFrontfill(last, node.Completed);
+                node.State.UpdateFromFrontfill(Config.IgnoreContinuationPoints ? last : goodLast, node.Completed);
             }
             else
             {
-                node.State.UpdateFromBackfill(first, node.Completed);
+                node.State.UpdateFromBackfill(Config.IgnoreContinuationPoints ? first : goodFirst, node.Completed);
             }
 
             int cnt = 0;
@@ -552,7 +643,7 @@ namespace Cognite.OpcUa.History
                     log.LogTrace("History DataPoint {DataPoint}", buffDp);
                     cnt++;
                 }
-                extractor.Streamer.Enqueue(buffDps);
+                await extractor.Streamer.EnqueueAsync(buffDps);
             }
 
             node.LastRead = cnt;
@@ -565,7 +656,7 @@ namespace Cognite.OpcUa.History
             {
                 log.LogDebug("Read {Count} datapoints from buffer of state {Id}", buffered.Count(), node.State.Id);
                 nodeState.UpdateFromStream(buffered);
-                extractor.Streamer.Enqueue(buffered);
+                await extractor.Streamer.EnqueueAsync(buffered);
             }
         }
 
@@ -590,7 +681,7 @@ namespace Cognite.OpcUa.History
         /// <param name="node">Active HistoryReadNode</param>
         /// <param name="details">History read details used to generate this HistoryRead result</param>
         /// <returns>Number of events read</returns>
-        private void HistoryEventHandler(HistoryReadNode node, HistoryReadDetails details)
+        private async Task HistoryEventHandler(HistoryReadNode node, HistoryReadDetails details)
         {
             var evts = node.LastResult as HistoryEvent;
             node.LastResult = null;
@@ -653,26 +744,7 @@ namespace Cognite.OpcUa.History
                 }
             }
 
-            if (config.IgnoreContinuationPoints)
-            {
-                // If all the returned events are at the end point, then we are receiving duplicates.
-                node.Completed = !any
-                    || Frontfill && first == last && last == node.State.SourceExtractedRange.Last
-                    || !Frontfill && first == last && last == node.State.SourceExtractedRange.First
-                    || !Frontfill && last <= historyStartTime;
-            }
-
-            if (maxReadLength != null)
-            {
-                if (Frontfill)
-                {
-                    node.Completed &= historyEndTime != null && node.EndTime >= historyEndTime || node.EndTime == DateTime.MinValue;
-                }
-                else
-                {
-                    node.Completed &= node.EndTime <= historyStartTime;
-                }
-            }
+            node.Completed = IsNodeCompleted(node, first, last, any);
 
             if (Frontfill)
             {
@@ -683,7 +755,7 @@ namespace Cognite.OpcUa.History
                 node.State.UpdateFromBackfill(first, node.Completed);
             }
 
-            extractor.Streamer.Enqueue(createdEvents);
+            await extractor.Streamer.EnqueueAsync(createdEvents);
 
             node.LastRead = createdEvents.Count;
             node.TotalRead += createdEvents.Count;
@@ -698,7 +770,7 @@ namespace Cognite.OpcUa.History
                 var (smin, smax) = buffered.MinMax(dp => dp.Time);
                 emitterState.UpdateFromStream(smin, smax);
                 log.LogDebug("Read {Count} events from buffer of state {Id}", buffered.Count(), node.State.Id);
-                extractor.Streamer.Enqueue(buffered);
+                await extractor.Streamer.EnqueueAsync(buffered);
             }
         }
         #endregion
